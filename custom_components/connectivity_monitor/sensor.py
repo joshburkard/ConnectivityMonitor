@@ -41,6 +41,10 @@ from .const import (
     CONF_DNS_SERVER,
     PROTOCOL_ICMP,
     PROTOCOL_RPC,
+    PROTOCOL_AD_DC,
+    PROTOCOL_TCP,
+    PROTOCOL_UDP,
+    AD_DC_PORTS,
     DEFAULT_PING_TIMEOUT,
     DEFAULT_DNS_SERVER
 )
@@ -63,26 +67,20 @@ async def async_setup_entry(
     update_interval = entry.data[CONF_INTERVAL]
     dns_server = entry.data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER)
 
-    # Create a list to store new entities
     entities = []
 
-    # Create sensors for each target
     for target in targets:
         coordinator = ConnectivityCoordinator(hass, target, update_interval, dns_server)
-        # Start the coordinator
         await coordinator.async_config_entry_first_refresh()
         entities.append(ConnectivitySensor(coordinator, target))
 
-    # Clean up unused entities
     current_unique_ids = {
         f"{target[CONF_HOST]}_{target[CONF_PROTOCOL]}_{target.get(CONF_PORT, 'ping')}"
         for target in targets
     }
 
-    # Get all current hosts
     current_hosts = {target[CONF_HOST] for target in targets}
 
-    # Clean up unused devices
     for device_entry in device_registry.devices.values():
         for identifier in device_entry.identifiers:
             if identifier[0] == DOMAIN:
@@ -90,7 +88,6 @@ async def async_setup_entry(
                 if host not in current_hosts:
                     device_registry.async_remove_device(device_entry.id)
 
-    # Clean up unused entities
     entity_entries = async_entries_for_config_entry(entity_registry, entry.entry_id)
     for entity_entry in entity_entries:
         if entity_entry.unique_id not in current_unique_ids:
@@ -131,7 +128,6 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
             except (socket.error, ValueError):
                 pass
 
-            # Create resolver and resolve hostname using the configured DNS server
             def _resolve():
                 resolver = dns.resolver.Resolver()
                 resolver.nameservers = [self._dns_server]
@@ -151,18 +147,7 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
             _LOGGER.error("Error resolving hostname %s: %s", hostname, err)
             return None
 
-    async def _get_resolver(self) -> dns.resolver.Resolver:
-        """Create DNS resolver in executor."""
-        def _create_resolver():
-            resolver = dns.resolver.Resolver()
-            resolver.nameservers = [self._dns_server]
-            resolver.timeout = 2
-            resolver.lifetime = 4
-            return resolver
-
-        return await self.hass.async_add_executor_job(_create_resolver)
-
-    async def _async_update_data(self):
+    async def _async_update_data(self) -> dict[str, Any]:
         """Fetch data from the target."""
         protocol = self.target[CONF_PROTOCOL]
         host = self.target[CONF_HOST]
@@ -179,7 +164,49 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
             resolved_host = self._resolved_ip
             result["resolved_ip"] = resolved_host
 
-            if protocol == "TCP":
+            if protocol == PROTOCOL_AD_DC:
+                # Test all AD DC ports
+                port_results = {}
+                all_connected = True
+                total_latency = 0
+                ports_checked = 0
+
+                for port, service in AD_DC_PORTS.items():
+                    try:
+                        start_time = self.hass.loop.time()
+                        reader, writer = await asyncio.wait_for(
+                            asyncio.open_connection(resolved_host, port),
+                            timeout=5
+                        )
+                        latency = (self.hass.loop.time() - start_time) * 1000
+                        writer.close()
+                        await writer.wait_closed()
+                        port_results[service] = {
+                            "port": port,
+                            "connected": True,
+                            "latency": round(latency, 2)
+                        }
+                        total_latency += latency
+                        ports_checked += 1
+                    except Exception as err:
+                        _LOGGER.debug(
+                            "AD DC port check failed for %s:%s (%s): %s",
+                            host, port, service, err
+                        )
+                        port_results[service] = {
+                            "port": port,
+                            "connected": False,
+                            "latency": None
+                        }
+                        all_connected = False
+
+                result.update({
+                    "connected": all_connected,
+                    "latency": round(total_latency / max(ports_checked, 1), 2) if ports_checked > 0 else None,
+                    "port_results": port_results
+                })
+
+            elif protocol == PROTOCOL_TCP:
                 start_time = self.hass.loop.time()
                 reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(resolved_host, self.target[CONF_PORT]),
@@ -193,7 +220,7 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
                     "latency": round(latency, 2)
                 })
 
-            elif protocol == "UDP":
+            elif protocol == PROTOCOL_UDP:
                 start_time = self.hass.loop.time()
                 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 sock.settimeout(5)
@@ -208,7 +235,7 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
                     "latency": round(latency, 2)
                 })
 
-            elif protocol == "ICMP":
+            elif protocol == PROTOCOL_ICMP:
                 response_time = await self.hass.async_add_executor_job(
                     ping, resolved_host, DEFAULT_PING_TIMEOUT, 1
                 )
@@ -230,7 +257,6 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
         self._available = True
         return result
 
-
 class ConnectivitySensor(CoordinatorEntity, SensorEntity):
     """Representation of a Connectivity Monitor sensor."""
 
@@ -246,6 +272,9 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
         if target[CONF_PROTOCOL] == PROTOCOL_ICMP:
             self._attr_name = "ICMP (Ping)"
             entity_id_suffix = f"{formatted_host}_icmp"
+        elif target[CONF_PROTOCOL] == PROTOCOL_AD_DC:
+            self._attr_name = "Active Directory DC"
+            entity_id_suffix = f"{formatted_host}_ad_dc"
         else:
             self._attr_name = f"{target[CONF_PROTOCOL]} {target[CONF_PORT]}"
             entity_id_suffix = f"{formatted_host}_{target[CONF_PROTOCOL].lower()}_{target[CONF_PORT]}"
@@ -253,7 +282,6 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
         # Set entity_id format
         self.entity_id = f"sensor.connectivity_monitor_{entity_id_suffix}"
 
-        # The unique_id stays the same as it's used for internal tracking
         self._attr_unique_id = (
             f"{target[CONF_HOST]}_{target[CONF_PROTOCOL]}_"
             f"{target.get(CONF_PORT, 'ping')}"
@@ -298,8 +326,8 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
             "dns_server": self.coordinator._dns_server
         }
 
-        # Add port if not ICMP
-        if self.target[CONF_PROTOCOL] != PROTOCOL_ICMP:
+        # Add port if not ICMP or AD DC
+        if self.target[CONF_PROTOCOL] not in [PROTOCOL_ICMP, PROTOCOL_AD_DC]:
             attrs["port"] = self.target[CONF_PORT]
 
         # Add latency if available
@@ -310,9 +338,14 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
         if self.coordinator.data.get("resolved_ip") is not None:
             attrs["resolved_ip"] = self.coordinator.data["resolved_ip"]
 
-        return attrs
+        # Add AD DC port results if available
+        if (self.target[CONF_PROTOCOL] == PROTOCOL_AD_DC and
+            self.coordinator.data.get("port_results")):
+            port_results = self.coordinator.data["port_results"]
+            for service, result in port_results.items():
+                attrs[f"{service}_port"] = result["port"]
+                attrs[f"{service}_connected"] = result["connected"]
+                if result["latency"] is not None:
+                    attrs[f"{service}_latency_ms"] = result["latency"]
 
-    @property
-    def should_poll(self) -> bool:
-        """Return if the sensor should poll."""
-        return False
+        return attrs

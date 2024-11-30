@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00007 | 30/11/2024 | added protocol type for Active Directory |
 | 0.1.00006 | 30/11/2024 | fixed Readme |
 | 0.1.00005 | 30/11/2024 | changed all files and vscode default settings to UTF-8 encoding |
 | 0.1.00004 | 30/11/2024 | added DNS configuration |
