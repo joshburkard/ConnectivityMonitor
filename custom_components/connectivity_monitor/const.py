@@ -1,4 +1,4 @@
-﻿# custom_components/connectivity_monitor/const.py
+# custom_components/connectivity_monitor/const.py
 """Constants for the Connectivity Monitor integration."""
 from datetime import timedelta
 

@@ -1,4 +1,4 @@
-﻿"""Support for Connectivity Monitor sensors."""
+"""Support for Connectivity Monitor sensors."""
 from __future__ import annotations
 
 import asyncio

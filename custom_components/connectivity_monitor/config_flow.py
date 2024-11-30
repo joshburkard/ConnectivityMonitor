@@ -1,4 +1,4 @@
-﻿# custom_components/connectivity_monitor/config_flow.py
+# custom_components/connectivity_monitor/config_flow.py
 """Config flow for Connectivity Monitor integration."""
 from __future__ import annotations
 
