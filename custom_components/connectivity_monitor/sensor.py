@@ -167,12 +167,21 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self.target = target
 
+        # Format the host for entity_id (replace dots with underscores)
+        formatted_host = target[CONF_HOST].replace('.', '_')
+
         # Create name based on protocol
         if target[CONF_PROTOCOL] == PROTOCOL_ICMP:
             self._attr_name = "ICMP (Ping)"
+            entity_id_suffix = f"{formatted_host}_icmp"
         else:
             self._attr_name = f"{target[CONF_PROTOCOL]} {target[CONF_PORT]}"
+            entity_id_suffix = f"{formatted_host}_{target[CONF_PROTOCOL].lower()}_{target[CONF_PORT]}"
 
+        # Set entity_id format
+        self.entity_id = f"sensor.connectivity_monitor_{entity_id_suffix}"
+
+        # The unique_id stays the same as it's used for internal tracking
         self._attr_unique_id = (
             f"{target[CONF_HOST]}_{target[CONF_PROTOCOL]}_"
             f"{target.get(CONF_PORT, 'ping')}"
@@ -183,8 +192,6 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
             name=target[CONF_HOST],
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
-            hw_version="1.0",
-            sw_version="1.0",
             configuration_url=f"http://{target[CONF_HOST]}",
             suggested_area="Network"
         )
