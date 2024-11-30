@@ -67,26 +67,33 @@ async def async_setup_entry(
     update_interval = entry.data[CONF_INTERVAL]
     dns_server = entry.data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER)
 
-    entities = []
+    # Clean up firmware and hardware versions from existing devices
+    current_hosts = {target[CONF_HOST] for target in targets}
+    for device_entry in device_registry.devices.values():
+        for identifier in device_entry.identifiers:
+            if identifier[0] == DOMAIN:
+                # Update existing devices to remove hw_version and sw_version
+                device_registry.async_update_device(
+                    device_entry.id,
+                    hw_version=None,
+                    sw_version=None
+                )
+                # Remove device if its host is no longer in targets
+                if identifier[1] not in current_hosts:
+                    device_registry.async_remove_device(device_entry.id)
 
+    # Create sensors
+    entities = []
     for target in targets:
         coordinator = ConnectivityCoordinator(hass, target, update_interval, dns_server)
         await coordinator.async_config_entry_first_refresh()
         entities.append(ConnectivitySensor(coordinator, target))
 
+    # Clean up unused entities
     current_unique_ids = {
         f"{target[CONF_HOST]}_{target[CONF_PROTOCOL]}_{target.get(CONF_PORT, 'ping')}"
         for target in targets
     }
-
-    current_hosts = {target[CONF_HOST] for target in targets}
-
-    for device_entry in device_registry.devices.values():
-        for identifier in device_entry.identifiers:
-            if identifier[0] == DOMAIN:
-                host = identifier[1]
-                if host not in current_hosts:
-                    device_registry.async_remove_device(device_entry.id)
 
     entity_entries = async_entries_for_config_entry(entity_registry, entry.entry_id)
     for entity_entry in entity_entries:
@@ -287,13 +294,12 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
             f"{target.get(CONF_PORT, 'ping')}"
         )
 
+        # Device info without hw_version and sw_version
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, target[CONF_HOST])},
             name=target[CONF_HOST],
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
-            hw_version="1.0",
-            sw_version="1.0",
             configuration_url=f"http://{target[CONF_HOST]}",
             suggested_area="Network"
         )
