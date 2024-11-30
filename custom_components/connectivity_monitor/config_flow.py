@@ -8,6 +8,7 @@ from homeassistant import config_entries
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import callback
 import homeassistant.helpers.config_validation as cv
+from ipaddress import ip_address, IPv4Address
 
 from .const import (
     DOMAIN,
@@ -17,6 +18,8 @@ from .const import (
     CONF_PROTOCOL,
     CONF_INTERVAL,
     CONF_TARGETS,
+    CONF_DNS_SERVER,
+    DEFAULT_DNS_SERVER,
     PROTOCOLS,
     PROTOCOL_ICMP,
     PROTOCOL_RPC
@@ -24,7 +27,14 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-def create_schema(protocol_default=DEFAULT_PROTOCOL):
+def is_valid_ip(ip: str) -> bool:
+    """Check if string is valid IP address."""
+    try:
+        return isinstance(ip_address(ip), IPv4Address)
+    except ValueError:
+        return False
+
+def create_target_schema(protocol_default=DEFAULT_PROTOCOL):
     """Create a schema based on selected protocol."""
     schema = {
         vol.Required(CONF_HOST): str,
@@ -49,11 +59,34 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._targets = []
         self._interval = DEFAULT_INTERVAL
         self._protocol = DEFAULT_PROTOCOL
+        self._dns_server = DEFAULT_DNS_SERVER
 
     async def async_step_user(self, user_input=None):
         """Handle the initial step."""
         if user_input is None:
-            return await self.async_step_add_target()
+            return await self.async_step_dns_server()
+
+    async def async_step_dns_server(self, user_input=None):
+        """Handle DNS server configuration."""
+        errors = {}
+
+        if user_input is not None:
+            dns_server = user_input[CONF_DNS_SERVER]
+            if is_valid_ip(dns_server):
+                self._dns_server = dns_server
+                return await self.async_step_add_target()
+            errors["base"] = "invalid_dns_server"
+
+        return self.async_show_form(
+            step_id="dns_server",
+            data_schema=vol.Schema({
+                vol.Required(CONF_DNS_SERVER, default=DEFAULT_DNS_SERVER): str,
+            }),
+            errors=errors,
+            description_placeholders={
+                "default_dns": DEFAULT_DNS_SERVER
+            }
+        )
 
     async def async_step_add_target(self, user_input=None):
         """Handle adding a target."""
@@ -69,7 +102,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if user_input[CONF_PROTOCOL] not in [PROTOCOL_ICMP, PROTOCOL_RPC]:
                 target[CONF_PORT] = int(user_input[CONF_PORT])
             elif user_input[CONF_PROTOCOL] == PROTOCOL_RPC:
-                # For RPC, we'll create multiple targets for standard ports
+                # For RPC, create multiple targets for standard ports
                 from .const import RPC_DEFAULT_PORTS
                 self._targets.extend([
                     {
@@ -87,7 +120,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="add_target",
-            data_schema=create_schema(self._protocol),
+            data_schema=create_target_schema(self._protocol),
             errors=errors,
         )
 
@@ -115,7 +148,8 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
             data = {
                 CONF_TARGETS: [target.copy() for target in self._targets],
-                CONF_INTERVAL: self._interval
+                CONF_INTERVAL: self._interval,
+                CONF_DNS_SERVER: self._dns_server
             }
 
             return self.async_create_entry(
@@ -146,6 +180,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self.config_entry = config_entry
         self._targets = [target.copy() for target in config_entry.data[CONF_TARGETS]]
         self._interval = config_entry.data[CONF_INTERVAL]
+        self._dns_server = config_entry.data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER)
         self._protocol = DEFAULT_PROTOCOL
 
     async def async_step_init(self, user_input=None):
@@ -161,17 +196,17 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_remove_target()
             elif user_input["next_step"] == "set_interval":
                 return await self.async_step_interval()
+            elif user_input["next_step"] == "change_dns":
+                return await self.async_step_dns_server()
             else:  # finish
-                # Update the configuration entry with new data
                 self.hass.config_entries.async_update_entry(
                     self.config_entry,
                     data={
                         CONF_TARGETS: [target.copy() for target in self._targets],
                         CONF_INTERVAL: self._interval,
+                        CONF_DNS_SERVER: self._dns_server,
                     }
                 )
-
-                # Reload the config entry to apply changes
                 await self.hass.config_entries.async_reload(self.config_entry.entry_id)
                 return self.async_create_entry(title="", data={})
 
@@ -182,12 +217,36 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     "add_target": "Add New Target",
                     "remove_target": "Remove Target",
                     "set_interval": "Set Update Interval",
+                    "change_dns": "Change DNS Server",
                     "finish": "Save Changes"
                 })
             }),
             description_placeholders={
                 "target_count": len(self._targets),
                 "interval": self._interval,
+                "dns_server": self._dns_server,
+            }
+        )
+
+    async def async_step_dns_server(self, user_input=None):
+        """Handle DNS server configuration."""
+        errors = {}
+
+        if user_input is not None:
+            dns_server = user_input[CONF_DNS_SERVER]
+            if is_valid_ip(dns_server):
+                self._dns_server = dns_server
+                return await self.async_step_menu()
+            errors["base"] = "invalid_dns_server"
+
+        return self.async_show_form(
+            step_id="dns_server",
+            data_schema=vol.Schema({
+                vol.Required(CONF_DNS_SERVER, default=self._dns_server): str,
+            }),
+            errors=errors,
+            description_placeholders={
+                "current_dns": self._dns_server
             }
         )
 
@@ -221,7 +280,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="add_target",
-            data_schema=create_schema(self._protocol),
+            data_schema=create_target_schema(self._protocol),
         )
 
     async def async_step_remove_target(self, user_input=None):

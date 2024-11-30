@@ -7,14 +7,15 @@ DOMAIN = "connectivity_monitor"
 DEFAULT_PORT = 80
 DEFAULT_PROTOCOL = "TCP"
 DEFAULT_INTERVAL = 30
+DEFAULT_DNS_SERVER = "1.1.1.1"  # Cloudflare DNS as default
 
 CONF_HOST = "host"
 CONF_PROTOCOL = "protocol"
 CONF_PORT = "port"
 CONF_INTERVAL = "interval"
 CONF_TARGETS = "targets"
+CONF_DNS_SERVER = "dns_server"
 
-# Add supported protocols
 PROTOCOL_TCP = "TCP"
 PROTOCOL_UDP = "UDP"
 PROTOCOL_ICMP = "ICMP"
