@@ -12,3 +12,18 @@ CONF_HOST = "host"
 CONF_PROTOCOL = "protocol"
 CONF_PORT = "port"
 CONF_INTERVAL = "interval"
+CONF_TARGETS = "targets"
+
+# Add supported protocols
+PROTOCOL_TCP = "TCP"
+PROTOCOL_UDP = "UDP"
+PROTOCOL_ICMP = "ICMP"
+PROTOCOL_RPC = "RPC"
+
+PROTOCOLS = [PROTOCOL_TCP, PROTOCOL_UDP, PROTOCOL_ICMP, PROTOCOL_RPC]
+
+# Default RPC ports
+RPC_DEFAULT_PORTS = [111, 135, 139, 445]
+
+# Default ping timeout in seconds
+DEFAULT_PING_TIMEOUT = 2
