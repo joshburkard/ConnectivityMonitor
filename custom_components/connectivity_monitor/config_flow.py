@@ -40,6 +40,7 @@ def create_protocol_schema(protocol: str | None = None) -> vol.Schema:
     """Create a schema based on protocol."""
     schema = {
         vol.Required(CONF_HOST): str,
+        vol.Optional("device_name", description={"suggested_value": ""}): str,
         vol.Required(CONF_PROTOCOL, default=protocol or DEFAULT_PROTOCOL): vol.In(
             {
                 PROTOCOL_TCP: "TCP (Custom Port)",
@@ -51,7 +52,6 @@ def create_protocol_schema(protocol: str | None = None) -> vol.Schema:
         ),
     }
 
-    # Only add port field if protocol is TCP or UDP
     if protocol in [PROTOCOL_TCP, PROTOCOL_UDP]:
         schema[vol.Required(CONF_PORT, default=DEFAULT_PORT)] = vol.All(
             vol.Coerce(int), vol.Range(min=1, max=65535)
@@ -63,6 +63,13 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Connectivity Monitor."""
 
     VERSION = 1
+
+    def __init__(self):
+        """Initialize config flow."""
+        self._targets = []
+        self._interval = DEFAULT_INTERVAL
+        self._protocol = DEFAULT_PROTOCOL
+        self._dns_server = DEFAULT_DNS_SERVER
 
     async def async_step_user(self, user_input=None):
         """Handle the initial step."""
@@ -99,6 +106,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             target = {
                 CONF_HOST: user_input[CONF_HOST],
                 CONF_PROTOCOL: user_input[CONF_PROTOCOL],
+                "device_name": user_input.get("device_name", "").strip() or user_input[CONF_HOST]
             }
 
             # Handle port for TCP/UDP protocols
@@ -112,7 +120,8 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     {
                         CONF_HOST: user_input[CONF_HOST],
                         CONF_PROTOCOL: PROTOCOL_TCP,  # RPC uses TCP
-                        CONF_PORT: port
+                        CONF_PORT: port,
+                        "device_name": user_input.get("device_name", "").strip() or user_input[CONF_HOST]
                     }
                     for port in RPC_DEFAULT_PORTS
                 ])
@@ -126,6 +135,32 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="add_target",
             data_schema=create_protocol_schema(self._protocol),
             errors=errors,
+        )
+
+    async def async_step_interval(self, user_input=None):
+        """Handle setting the update interval."""
+        if user_input is not None:
+            self._interval = user_input[CONF_INTERVAL]
+
+            # Create the final data structure with all information
+            data = {
+                CONF_TARGETS: [target.copy() for target in self._targets],
+                CONF_INTERVAL: self._interval,
+                CONF_DNS_SERVER: self._dns_server
+            }
+
+            return self.async_create_entry(
+                title=f"Connectivity Monitor ({len(self._targets)} targets)",
+                data=data
+            )
+
+        return self.async_show_form(
+            step_id="interval",
+            data_schema=vol.Schema({
+                vol.Required(CONF_INTERVAL, default=DEFAULT_INTERVAL): vol.All(
+                    vol.Coerce(int), vol.Range(min=5, max=300)
+                ),
+            }),
         )
 
     async def async_step_dns_server(self, user_input=None):
@@ -190,31 +225,6 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             }
         )
 
-    async def async_step_interval(self, user_input=None):
-        """Handle setting the update interval."""
-        if user_input is not None:
-            self._interval = user_input[CONF_INTERVAL]
-
-            data = {
-                CONF_TARGETS: [target.copy() for target in self._targets],
-                CONF_INTERVAL: self._interval,
-                CONF_DNS_SERVER: self._dns_server
-            }
-
-            return self.async_create_entry(
-                title=f"Connectivity Monitor ({len(self._targets)} targets)",
-                data=data
-            )
-
-        return self.async_show_form(
-            step_id="interval",
-            data_schema=vol.Schema({
-                vol.Required(CONF_INTERVAL, default=DEFAULT_INTERVAL): vol.All(
-                    vol.Coerce(int), vol.Range(min=5, max=300)
-                ),
-            }),
-        )
-
     @staticmethod
     @callback
     def async_get_options_flow(config_entry):
@@ -239,22 +249,24 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_menu(self, user_input=None):
         """Handle the menu step."""
         if user_input is not None:
-            if user_input["next_step"] == "add_target":
+            menu_option = user_input["next_step"]
+            if menu_option == "add_target":
                 return await self.async_step_add_target()
-            elif user_input["next_step"] == "remove_target":
+            elif menu_option == "remove_target":
                 return await self.async_step_remove_target()
-            elif user_input["next_step"] == "set_interval":
+            elif menu_option == "set_interval":
                 return await self.async_step_interval()
-            elif user_input["next_step"] == "change_dns":
+            elif menu_option == "change_dns":
                 return await self.async_step_dns_server()
             else:  # finish
+                new_data = {
+                    CONF_TARGETS: [target.copy() for target in self._targets],
+                    CONF_INTERVAL: self._interval,
+                    CONF_DNS_SERVER: self._dns_server
+                }
                 self.hass.config_entries.async_update_entry(
                     self.config_entry,
-                    data={
-                        CONF_TARGETS: [target.copy() for target in self._targets],
-                        CONF_INTERVAL: self._interval,
-                        CONF_DNS_SERVER: self._dns_server,
-                    }
+                    data=new_data
                 )
                 await self.hass.config_entries.async_reload(self.config_entry.entry_id)
                 return self.async_create_entry(title="", data={})
@@ -305,6 +317,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             target = {
                 CONF_HOST: user_input[CONF_HOST],
                 CONF_PROTOCOL: user_input[CONF_PROTOCOL],
+                "device_name": user_input.get("device_name", "").strip() or user_input[CONF_HOST]
             }
 
             # Handle port for TCP/UDP protocols
@@ -318,7 +331,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     {
                         CONF_HOST: user_input[CONF_HOST],
                         CONF_PROTOCOL: PROTOCOL_TCP,
-                        CONF_PORT: port
+                        CONF_PORT: port,
+                        "device_name": user_input.get("device_name", "").strip() or user_input[CONF_HOST]
                     }
                     for port in RPC_DEFAULT_PORTS
                 ])
@@ -332,6 +346,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id="add_target",
             data_schema=create_protocol_schema(self._protocol),
         )
+
 
     async def async_step_remove_target(self, user_input=None):
         """Handle removing a target."""

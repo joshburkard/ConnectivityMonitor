@@ -272,32 +272,45 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self.target = target
 
-        # Format the host for entity_id (replace dots with underscores)
-        formatted_host = target[CONF_HOST].replace('.', '_')
+        # Get and sanitize device name for entity_id
+        device_name = target.get("device_name", target[CONF_HOST])
+        entity_id_name = (device_name.lower()
+                         .replace(' ', '_')
+                         .replace('-', '_')
+                         .replace('.', '_')
+                         .replace('(', '')
+                         .replace(')', '')
+                         .replace('[', '')
+                         .replace(']', '')
+                         .replace('/', '_')
+                         .replace('\\', '_')
+                         .replace('@', '_at_')
+                         .replace('&', '_and_'))
 
         # Create name based on protocol
         if target[CONF_PROTOCOL] == PROTOCOL_ICMP:
-            self._attr_name = "ICMP (Ping)"
-            entity_id_suffix = f"{formatted_host}_icmp"
+            self._attr_name = f"{device_name} ICMP (Ping)"
+            entity_id_suffix = f"{entity_id_name}_icmp"
         elif target[CONF_PROTOCOL] == PROTOCOL_AD_DC:
-            self._attr_name = "Active Directory DC"
-            entity_id_suffix = f"{formatted_host}_ad_dc"
+            self._attr_name = f"{device_name} Active Directory DC"
+            entity_id_suffix = f"{entity_id_name}_ad_dc"
         else:
-            self._attr_name = f"{target[CONF_PROTOCOL]} {target[CONF_PORT]}"
-            entity_id_suffix = f"{formatted_host}_{target[CONF_PROTOCOL].lower()}_{target[CONF_PORT]}"
+            self._attr_name = f"{device_name} {target[CONF_PROTOCOL]} {target[CONF_PORT]}"
+            entity_id_suffix = f"{entity_id_name}_{target[CONF_PROTOCOL].lower()}_{target[CONF_PORT]}"
 
         # Set entity_id format
         self.entity_id = f"sensor.connectivity_monitor_{entity_id_suffix}"
 
+        # The unique_id stays the same (using host) to maintain entity identity
         self._attr_unique_id = (
             f"{target[CONF_HOST]}_{target[CONF_PROTOCOL]}_"
             f"{target.get(CONF_PORT, 'ping')}"
         )
 
-        # Device info without hw_version and sw_version
+        # Device info with custom name
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, target[CONF_HOST])},
-            name=target[CONF_HOST],
+            name=device_name,
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
             configuration_url=f"http://{target[CONF_HOST]}",
