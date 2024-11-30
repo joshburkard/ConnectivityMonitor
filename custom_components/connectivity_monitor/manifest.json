@@ -1,4 +1,4 @@
-﻿{
+{
     "domain": "connectivity_monitor",
     "name": "Connectivity Monitor",
     "codeowners": ["@joshburkard"],

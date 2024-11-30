@@ -1,4 +1,4 @@
-﻿# custom_components/connectivity_monitor/dns.py
+# custom_components/connectivity_monitor/dns.py
 """DNS resolution handling for Connectivity Monitor."""
 import logging
 import socket
