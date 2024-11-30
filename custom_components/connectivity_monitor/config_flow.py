@@ -1,4 +1,3 @@
-# custom_components/connectivity_monitor/config_flow.py
 """Config flow for Connectivity Monitor integration."""
 from __future__ import annotations
 
@@ -22,7 +21,10 @@ from .const import (
     DEFAULT_DNS_SERVER,
     PROTOCOLS,
     PROTOCOL_ICMP,
-    PROTOCOL_RPC
+    PROTOCOL_RPC,
+    PROTOCOL_AD_DC,
+    PROTOCOL_TCP,
+    PROTOCOL_UDP
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -34,15 +36,23 @@ def is_valid_ip(ip: str) -> bool:
     except ValueError:
         return False
 
-def create_target_schema(protocol_default=DEFAULT_PROTOCOL):
-    """Create a schema based on selected protocol."""
+def create_protocol_schema(protocol: str | None = None) -> vol.Schema:
+    """Create a schema based on protocol."""
     schema = {
         vol.Required(CONF_HOST): str,
-        vol.Required(CONF_PROTOCOL, default=protocol_default): vol.In(PROTOCOLS),
+        vol.Required(CONF_PROTOCOL, default=protocol or DEFAULT_PROTOCOL): vol.In(
+            {
+                PROTOCOL_TCP: "TCP (Custom Port)",
+                PROTOCOL_UDP: "UDP (Custom Port)",
+                PROTOCOL_ICMP: "ICMP (Ping)",
+                PROTOCOL_RPC: "RPC (Standard Ports)",
+                PROTOCOL_AD_DC: "Active Directory DC"
+            }
+        ),
     }
 
-    # Only add port field if not ICMP
-    if protocol_default not in [PROTOCOL_ICMP, PROTOCOL_RPC]:
+    # Only add port field if protocol is TCP or UDP
+    if protocol in [PROTOCOL_TCP, PROTOCOL_UDP]:
         schema[vol.Required(CONF_PORT, default=DEFAULT_PORT)] = vol.All(
             vol.Coerce(int), vol.Range(min=1, max=65535)
         )
@@ -53,13 +63,6 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Connectivity Monitor."""
 
     VERSION = 1
-
-    def __init__(self):
-        """Initialize config flow."""
-        self._targets = []
-        self._interval = DEFAULT_INTERVAL
-        self._protocol = DEFAULT_PROTOCOL
-        self._dns_server = DEFAULT_DNS_SERVER
 
     async def async_step_user(self, user_input=None):
         """Handle the initial step."""
@@ -98,31 +101,77 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PROTOCOL: user_input[CONF_PROTOCOL],
             }
 
-            # Add port if not ICMP or RPC
-            if user_input[CONF_PROTOCOL] not in [PROTOCOL_ICMP, PROTOCOL_RPC]:
+            # Handle port for TCP/UDP protocols
+            if user_input[CONF_PROTOCOL] in [PROTOCOL_TCP, PROTOCOL_UDP]:
                 target[CONF_PORT] = int(user_input[CONF_PORT])
+                self._targets.append(target.copy())
             elif user_input[CONF_PROTOCOL] == PROTOCOL_RPC:
                 # For RPC, create multiple targets for standard ports
                 from .const import RPC_DEFAULT_PORTS
                 self._targets.extend([
                     {
                         CONF_HOST: user_input[CONF_HOST],
-                        CONF_PROTOCOL: "TCP",  # RPC uses TCP
+                        CONF_PROTOCOL: PROTOCOL_TCP,  # RPC uses TCP
                         CONF_PORT: port
                     }
                     for port in RPC_DEFAULT_PORTS
                 ])
-                return await self.async_step_another()
+            else:  # ICMP or AD_DC
+                self._targets.append(target.copy())
 
-            self._targets.append(target.copy())
-            self._protocol = user_input[CONF_PROTOCOL]  # Remember protocol for next target
+            self._protocol = user_input[CONF_PROTOCOL]
             return await self.async_step_another()
 
         return self.async_show_form(
             step_id="add_target",
-            data_schema=create_target_schema(self._protocol),
+            data_schema=create_protocol_schema(self._protocol),
             errors=errors,
         )
+
+    async def async_step_dns_server(self, user_input=None):
+        """Handle DNS server configuration."""
+        errors = {}
+
+        if user_input is not None:
+            dns_server = user_input[CONF_DNS_SERVER]
+            if is_valid_ip(dns_server):
+                self._dns_server = dns_server
+                return await self.async_step_add_target()
+            errors["base"] = "invalid_dns_server"
+
+        return self.async_show_form(
+            step_id="dns_server",
+            data_schema=vol.Schema({
+                vol.Required(CONF_DNS_SERVER, default=DEFAULT_DNS_SERVER): str,
+            }),
+            errors=errors,
+            description_placeholders={
+                "default_dns": DEFAULT_DNS_SERVER
+            }
+        )
+
+    def _create_schema_for_protocol(self, protocol: str | None = None) -> vol.Schema:
+        """Create a schema based on protocol."""
+        schema = {
+            vol.Required(CONF_HOST): str,
+            vol.Required(CONF_PROTOCOL, default=protocol or DEFAULT_PROTOCOL): vol.In(
+                {
+                    PROTOCOL_TCP: "TCP (Custom Port)",
+                    PROTOCOL_UDP: "UDP (Custom Port)",
+                    PROTOCOL_ICMP: "ICMP (Ping)",
+                    PROTOCOL_RPC: "RPC (Standard Ports)",
+                    PROTOCOL_AD_DC: "Active Directory DC"
+                }
+            ),
+        }
+
+        # Only add port field if protocol is TCP or UDP
+        if protocol in [PROTOCOL_TCP, PROTOCOL_UDP]:
+            schema[vol.Required(CONF_PORT, default=DEFAULT_PORT)] = vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=65535)
+            )
+
+        return vol.Schema(schema)
 
     async def async_step_another(self, user_input=None):
         """Handle adding another target or finishing setup."""
@@ -258,29 +307,30 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 CONF_PROTOCOL: user_input[CONF_PROTOCOL],
             }
 
-            # Add port if not ICMP or RPC
-            if user_input[CONF_PROTOCOL] not in [PROTOCOL_ICMP, PROTOCOL_RPC]:
+            # Handle port for TCP/UDP protocols
+            if user_input[CONF_PROTOCOL] in [PROTOCOL_TCP, PROTOCOL_UDP]:
                 target[CONF_PORT] = int(user_input[CONF_PORT])
+                self._targets.append(target.copy())
             elif user_input[CONF_PROTOCOL] == PROTOCOL_RPC:
                 # For RPC, create multiple targets for standard ports
                 from .const import RPC_DEFAULT_PORTS
                 self._targets.extend([
                     {
                         CONF_HOST: user_input[CONF_HOST],
-                        CONF_PROTOCOL: "TCP",  # RPC uses TCP
+                        CONF_PROTOCOL: PROTOCOL_TCP,
                         CONF_PORT: port
                     }
                     for port in RPC_DEFAULT_PORTS
                 ])
-                return await self.async_step_menu()
+            else:  # ICMP or AD_DC
+                self._targets.append(target.copy())
 
-            self._targets.append(target.copy())
             self._protocol = user_input[CONF_PROTOCOL]
             return await self.async_step_menu()
 
         return self.async_show_form(
             step_id="add_target",
-            data_schema=create_target_schema(self._protocol),
+            data_schema=create_protocol_schema(self._protocol),
         )
 
     async def async_step_remove_target(self, user_input=None):
