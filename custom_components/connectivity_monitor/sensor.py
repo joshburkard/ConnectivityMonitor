@@ -1,5 +1,4 @@
-﻿# custom_components/connectivity_monitor/sensor.py
-"""Support for Connectivity Monitor sensors."""
+﻿"""Support for Connectivity Monitor sensors."""
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +6,13 @@ from datetime import timedelta
 import logging
 import socket
 from typing import Any
+
+try:
+    import dns.resolver
+    import dns.exception
+    HAVE_DNS = True
+except ImportError:
+    HAVE_DNS = False
 
 from ping3 import ping
 from homeassistant.components.sensor import SensorEntity
@@ -23,6 +29,7 @@ from homeassistant.helpers.entity_registry import (
     async_get as async_get_entity_registry,
 )
 from homeassistant.helpers.device_registry import async_get as async_get_device_registry
+from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import (
     DOMAIN,
@@ -31,9 +38,11 @@ from .const import (
     CONF_PORT,
     CONF_INTERVAL,
     CONF_TARGETS,
+    CONF_DNS_SERVER,
     PROTOCOL_ICMP,
     PROTOCOL_RPC,
-    DEFAULT_PING_TIMEOUT
+    DEFAULT_PING_TIMEOUT,
+    DEFAULT_DNS_SERVER
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -44,17 +53,24 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Connectivity Monitor sensors."""
+    if not HAVE_DNS:
+        _LOGGER.error("DNS Python package not found. Please install it.")
+        raise ConfigEntryNotReady
+
     entity_registry = async_get_entity_registry(hass)
     device_registry = async_get_device_registry(hass)
     targets = hass.data[DOMAIN][entry.entry_id]
     update_interval = entry.data[CONF_INTERVAL]
+    dns_server = entry.data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER)
 
     # Create a list to store new entities
     entities = []
 
     # Create sensors for each target
     for target in targets:
-        coordinator = ConnectivityCoordinator(hass, target, update_interval)
+        coordinator = ConnectivityCoordinator(hass, target, update_interval, dns_server)
+        # Start the coordinator
+        await coordinator.async_config_entry_first_refresh()
         entities.append(ConnectivitySensor(coordinator, target))
 
     # Clean up unused entities
@@ -82,14 +98,10 @@ async def async_setup_entry(
 
     async_add_entities(entities, True)
 
-    # Start all coordinators
-    for entity in entities:
-        await entity.coordinator.async_start()
-
 class ConnectivityCoordinator(DataUpdateCoordinator):
     """Class to manage fetching Connectivity Monitor data."""
 
-    def __init__(self, hass: HomeAssistant, target: dict, update_interval: int) -> None:
+    def __init__(self, hass: HomeAssistant, target: dict, update_interval: int, dns_server: str) -> None:
         """Initialize the coordinator."""
         super().__init__(
             hass,
@@ -100,29 +112,86 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
         self.target = target
         self._available = False
         self._last_state = False
-        self._last_latency = None
+        self._resolved_ip = None
+        self._dns_server = dns_server
 
-    async def async_start(self):
-        """Start the coordinator update loop."""
-        await self.async_refresh()
+    async def _resolve_host(self, hostname: str) -> str | None:
+        """Resolve hostname to IP address."""
+        try:
+            # Check if it's already an IP address
+            try:
+                socket.inet_pton(socket.AF_INET, hostname)
+                return hostname  # It's already an IP address
+            except (socket.error, ValueError):
+                pass
 
-    async def _async_update_data(self) -> dict[str, Any]:
+            try:
+                socket.inet_pton(socket.AF_INET6, hostname)
+                return hostname  # It's already an IPv6 address
+            except (socket.error, ValueError):
+                pass
+
+            # Create resolver and resolve hostname using the configured DNS server
+            def _resolve():
+                resolver = dns.resolver.Resolver()
+                resolver.nameservers = [self._dns_server]
+                resolver.timeout = 2
+                resolver.lifetime = 4
+                try:
+                    answers = resolver.resolve(hostname, "A")
+                    if answers:
+                        return str(answers[0])
+                except dns.exception.DNSException as err:
+                    _LOGGER.error("DNS resolution failed for %s: %s", hostname, err)
+                return None
+
+            return await self.hass.async_add_executor_job(_resolve)
+
+        except Exception as err:
+            _LOGGER.error("Error resolving hostname %s: %s", hostname, err)
+            return None
+
+    async def _get_resolver(self) -> dns.resolver.Resolver:
+        """Create DNS resolver in executor."""
+        def _create_resolver():
+            resolver = dns.resolver.Resolver()
+            resolver.nameservers = [self._dns_server]
+            resolver.timeout = 2
+            resolver.lifetime = 4
+            return resolver
+
+        return await self.hass.async_add_executor_job(_create_resolver)
+
+    async def _async_update_data(self):
         """Fetch data from the target."""
         protocol = self.target[CONF_PROTOCOL]
         host = self.target[CONF_HOST]
-        result = {"connected": False, "latency": None}
+        result = {"connected": False, "latency": None, "resolved_ip": None}
 
         try:
+            # Resolve hostname if needed
+            if not self._resolved_ip:
+                self._resolved_ip = await self._resolve_host(host)
+                if not self._resolved_ip:
+                    _LOGGER.error("Could not resolve hostname %s", host)
+                    return result
+
+            resolved_host = self._resolved_ip
+            result["resolved_ip"] = resolved_host
+
             if protocol == "TCP":
                 start_time = self.hass.loop.time()
                 reader, writer = await asyncio.wait_for(
-                    asyncio.open_connection(host, self.target[CONF_PORT]),
+                    asyncio.open_connection(resolved_host, self.target[CONF_PORT]),
                     timeout=5
                 )
-                latency = (self.hass.loop.time() - start_time) * 1000  # Convert to ms
+                latency = (self.hass.loop.time() - start_time) * 1000
                 writer.close()
                 await writer.wait_closed()
-                result = {"connected": True, "latency": round(latency, 2)}
+                result.update({
+                    "connected": True,
+                    "latency": round(latency, 2)
+                })
 
             elif protocol == "UDP":
                 start_time = self.hass.loop.time()
@@ -130,22 +199,24 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
                 sock.settimeout(5)
                 await self.hass.async_add_executor_job(
                     sock.connect,
-                    (host, self.target[CONF_PORT])
+                    (resolved_host, self.target[CONF_PORT])
                 )
                 latency = (self.hass.loop.time() - start_time) * 1000
                 sock.close()
-                result = {"connected": True, "latency": round(latency, 2)}
+                result.update({
+                    "connected": True,
+                    "latency": round(latency, 2)
+                })
 
             elif protocol == "ICMP":
-                # Run ping in executor to avoid blocking
                 response_time = await self.hass.async_add_executor_job(
-                    ping, host, DEFAULT_PING_TIMEOUT, 1
+                    ping, resolved_host, DEFAULT_PING_TIMEOUT, 1
                 )
                 if response_time is not None:
-                    result = {
+                    result.update({
                         "connected": True,
-                        "latency": round(response_time * 1000, 2)  # Convert to ms
-                    }
+                        "latency": round(response_time * 1000, 2)
+                    })
 
         except Exception as err:
             _LOGGER.debug(
@@ -158,6 +229,7 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
 
         self._available = True
         return result
+
 
 class ConnectivitySensor(CoordinatorEntity, SensorEntity):
     """Representation of a Connectivity Monitor sensor."""
@@ -192,6 +264,8 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
             name=target[CONF_HOST],
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
+            hw_version="1.0",
+            sw_version="1.0",
             configuration_url=f"http://{target[CONF_HOST]}",
             suggested_area="Network"
         )
@@ -221,6 +295,7 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
         attrs = {
             "host": self.target[CONF_HOST],
             "protocol": self.target[CONF_PROTOCOL],
+            "dns_server": self.coordinator._dns_server
         }
 
         # Add port if not ICMP
@@ -230,6 +305,10 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
         # Add latency if available
         if self.coordinator.data.get("latency") is not None:
             attrs["latency_ms"] = self.coordinator.data["latency"]
+
+        # Add resolved IP if available
+        if self.coordinator.data.get("resolved_ip") is not None:
+            attrs["resolved_ip"] = self.coordinator.data["resolved_ip"]
 
         return attrs
 

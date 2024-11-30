@@ -1,0 +1,60 @@
+﻿{
+    "config": {
+        "step": {
+            "dns_server": {
+                "title": "DNS Server Configuration",
+                "description": "Enter the IP address of the DNS server to use for hostname resolution.\nDefault: {default_dns}",
+                "data": {
+                    "dns_server": "DNS Server IP"
+                }
+            },
+            "add_target": {
+                "title": "Add Target",
+                "description": "Add a target to monitor",
+                "data": {
+                    "host": "Host (IP or FQDN)",
+                    "protocol": "Protocol",
+                    "port": "Port"
+                }
+            },
+            "another": {
+                "title": "Add Another Target",
+                "description": "Do you want to add another target? Currently configured: {target_count}",
+                "data": {
+                    "another": "Add another target"
+                }
+            },
+            "interval": {
+                "title": "Update Interval",
+                "description": "How often to check targets (in seconds)",
+                "data": {
+                    "interval": "Update interval"
+                }
+            }
+        },
+        "error": {
+            "invalid_dns_server": "Invalid DNS server IP address"
+        }
+    },
+    "options": {
+        "step": {
+            "menu": {
+                "title": "Configure Connectivity Monitor",
+                "description": "Targets: {target_count}\nInterval: {interval} seconds\nDNS Server: {dns_server}",
+                "data": {
+                    "next_step": "Choose action"
+                }
+            },
+            "dns_server": {
+                "title": "Change DNS Server",
+                "description": "Current DNS server: {current_dns}",
+                "data": {
+                    "dns_server": "New DNS Server IP"
+                }
+            }
+        },
+        "error": {
+            "invalid_dns_server": "Invalid DNS server IP address"
+        }
+    }
+}
