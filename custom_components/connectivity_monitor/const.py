@@ -19,7 +19,7 @@ PROTOCOL_TCP = "TCP"
 PROTOCOL_UDP = "UDP"
 PROTOCOL_ICMP = "ICMP"
 PROTOCOL_RPC = "RPC"
-PROTOCOL_AD_DC = "AD_DC"  # New protocol for Active Directory DC
+PROTOCOL_AD_DC = "Active Directory Domain Controller"  # New protocol for Active Directory DC
 
 PROTOCOLS = [PROTOCOL_TCP, PROTOCOL_UDP, PROTOCOL_ICMP, PROTOCOL_RPC, PROTOCOL_AD_DC]
 
