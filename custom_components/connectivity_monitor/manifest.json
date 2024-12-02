@@ -3,10 +3,14 @@
     "name": "Connectivity Monitor",
     "codeowners": ["@joshburkard"],
     "config_flow": true,
-    "documentation": "https://github.com/joshburkard/ConnectivityMonitor",
+    "documentation": "https://github.com/joshburkard/ha-omada",
     "iot_class": "local_polling",
     "issue_tracker": "",
+<<<<<<< HEAD
     "version": "0.1.00011",
+=======
+    "version": "0.1.00010",
+>>>>>>> b7094e84e6077e1e8ea9d1b5f942f9f8c962446e
     "requirements": [
         "ping3==4.0.4",
         "dnspython==2.4.2"

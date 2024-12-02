@@ -2,7 +2,10 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+<<<<<<< HEAD
 | 0.1.00011 | 02/12/2024 | fixed issues after moved each device to a separate config and added an Overall sensor per device |
+=======
+>>>>>>> b7094e84e6077e1e8ea9d1b5f942f9f8c962446e
 | 0.1.00010 | 02/12/2024 | moved each device to a separate config and added an Overall sensor per device |
 | 0.1.00009 | 30/11/2024 | add device name to config flow |
 | 0.1.00008 | 30/11/2024 | removed firmware and hardware version on devices cause it's not needed and useless |
