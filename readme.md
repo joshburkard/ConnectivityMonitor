@@ -51,10 +51,12 @@ This custom component was created without any knowledge of Python but with use o
 
 this changes are planned:
 
-- create an Overall sensor per device
-- add Device information:
-  - IP-Address
-- let use of `Add Device`
+- [ ] create an Overall sensor per device
+- [ ] add Device information:
+  - [ ] IP-Address
+  - [ ] MAC Address
+- [ ] let use of `Add Device`
+- [ ] change default interval to 300 seconds
 
 ## Icon
 

@@ -2,6 +2,8 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00011 | 02/12/2024 | fixed issues after moved each device to a separate config and added an Overall sensor per device |
+| 0.1.00010 | 02/12/2024 | moved each device to a separate config and added an Overall sensor per device |
 | 0.1.00009 | 30/11/2024 | add device name to config flow |
 | 0.1.00008 | 30/11/2024 | removed firmware and hardware version on devices cause it's not needed and useless |
 | 0.1.00007 | 30/11/2024 | added protocol type for Active Directory |

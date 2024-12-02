@@ -19,11 +19,14 @@ PROTOCOL_TCP = "TCP"
 PROTOCOL_UDP = "UDP"
 PROTOCOL_ICMP = "ICMP"
 PROTOCOL_RPC = "RPC"
-PROTOCOL_AD_DC = "Active Directory Domain Controller"  # New protocol for Active Directory DC
+PROTOCOL_AD_DC = "AD_DC"
 
-PROTOCOLS = [PROTOCOL_TCP, PROTOCOL_UDP, PROTOCOL_ICMP, PROTOCOL_RPC, PROTOCOL_AD_DC]
+PROTOCOLS = [PROTOCOL_TCP, PROTOCOL_UDP, PROTOCOL_ICMP, PROTOCOL_AD_DC]
 
-# Default ports for Active Directory DC
+# Default RPC ports
+RPC_DEFAULT_PORTS = [111, 135, 139, 445]
+
+# Default Active Directory ports
 AD_DC_PORTS = {
     88: "Kerberos",
     139: "NetBIOS",
@@ -34,9 +37,6 @@ AD_DC_PORTS = {
     3268: "Global Catalog",
     3269: "Global Catalog SSL"
 }
-
-# Default RPC ports
-RPC_DEFAULT_PORTS = [111, 135, 139, 445]
 
 # Default ping timeout in seconds
 DEFAULT_PING_TIMEOUT = 2
