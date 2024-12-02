@@ -46,3 +46,16 @@ here you will find the [Change Log](changelog.md)
 ## Notes
 
 This custom component was created without any knowledge of Python but with use of Claude AI
+
+## Tasks
+
+this changes are planned:
+
+- create an Overall sensor per device
+- add Device information:
+  - IP-Address
+- let use of `Add Device`
+
+## Icon
+
+the icon and logo is made by [Freepik - Flaticon](https://www.flaticon.com/free-icons/electronics)
