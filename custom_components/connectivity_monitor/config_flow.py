@@ -21,7 +21,6 @@ from .const import (
     DEFAULT_DNS_SERVER,
     PROTOCOLS,
     PROTOCOL_ICMP,
-    PROTOCOL_RPC,
     PROTOCOL_AD_DC,
     PROTOCOL_TCP,
     PROTOCOL_UDP,
@@ -38,7 +37,10 @@ def is_valid_ip(ip: str) -> bool:
         return False
 
 class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
+<<<<<<< HEAD
+=======
     """Handle a config flow for Connectivity Monitor."""
+>>>>>>> b7094e84e6077e1e8ea9d1b5f942f9f8c962446e
     VERSION = 1
     CONNECTION_CLASS = config_entries.CONN_CLASS_LOCAL_POLL
 
@@ -130,6 +132,10 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         # Create a list of targets based on protocol
         targets = []
         if self._data[CONF_PROTOCOL] == PROTOCOL_AD_DC:
+<<<<<<< HEAD
+            from .const import AD_DC_PORTS
+=======
+>>>>>>> b7094e84e6077e1e8ea9d1b5f942f9f8c962446e
             targets.extend([{
                 CONF_HOST: self._data[CONF_HOST],
                 CONF_PROTOCOL: PROTOCOL_TCP,
@@ -153,6 +159,8 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_INTERVAL: self._data[CONF_INTERVAL],
                 CONF_DNS_SERVER: self._data[CONF_DNS_SERVER]
             }
+<<<<<<< HEAD
+=======
         )
 
     @staticmethod
@@ -187,4 +195,5 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     vol.Coerce(int), vol.Range(min=5, max=300)
                 ),
             }),
+>>>>>>> b7094e84e6077e1e8ea9d1b5f942f9f8c962446e
         )

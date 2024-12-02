@@ -1,4 +1,3 @@
-# custom_components/connectivity_monitor/__init__.py
 """The Connectivity Monitor integration."""
 from __future__ import annotations
 
