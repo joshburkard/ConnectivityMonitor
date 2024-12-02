@@ -48,7 +48,6 @@ async def async_setup_entry(
 ) -> None:
     entity_registry = async_get_entity_registry(hass)
     device_registry = async_get_device_registry(hass)
-<<<<<<< HEAD
     update_interval = entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL)
     dns_server = entry.data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER)
 
@@ -58,38 +57,10 @@ async def async_setup_entry(
     current_hosts = {target[CONF_HOST] for target in targets}
 
     # Create sensors for each target
-=======
-    targets = entry.data[CONF_TARGETS]
-    update_interval = entry.data[CONF_INTERVAL]
-    dns_server = entry.data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER)
-
-    # Get list of devices first
-    device_entries = list(device_registry.devices.values())
-    current_hosts = {target[CONF_HOST] for target in targets}
-
-    # Clean up firmware and hardware versions from existing devices
-    for device_entry in device_entries:
-        for identifier in device_entry.identifiers:
-            if identifier[0] == DOMAIN:
-                device_registry.async_update_device(
-                    device_entry.id,
-                    hw_version=None,
-                    sw_version=None
-                )
-                if identifier[1] not in current_hosts:
-                    device_registry.async_remove_device(device_entry.id)
-
-    # Create sensors
-    coordinators = []
-    entities = []
-
-    # Create regular sensors
->>>>>>> b7094e84e6077e1e8ea9d1b5f942f9f8c962446e
     for target in targets:
         host = target[CONF_HOST]
         coordinator = ConnectivityCoordinator(hass, target, update_interval, dns_server)
         await coordinator.async_config_entry_first_refresh()
-<<<<<<< HEAD
 
         if host not in coordinators:
             coordinators[host] = []
@@ -102,20 +73,6 @@ async def async_setup_entry(
         overview_coordinator = ConnectivityCoordinator(hass, base_target, update_interval, dns_server)
         await overview_coordinator.async_config_entry_first_refresh()
         entities.append(OverviewSensor(overview_coordinator, base_target, host_coordinators))
-=======
-        coordinators.append(coordinator)
-        entities.append(ConnectivitySensor(coordinator, target))
-
-    # Create overview sensors (one per device)
-    seen_hosts = set()
-    for target in targets:
-        host = target[CONF_HOST]
-        if host not in seen_hosts:
-            seen_hosts.add(host)
-            overview_coordinator = ConnectivityCoordinator(hass, target, update_interval, dns_server)
-            await overview_coordinator.async_config_entry_first_refresh()
-            entities.append(OverAllSensor(overview_coordinator, target, coordinators))
->>>>>>> b7094e84e6077e1e8ea9d1b5f942f9f8c962446e
 
     # Clean up unused entities
     current_unique_ids = set()
@@ -360,90 +317,6 @@ class OverviewSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def extra_state_attributes(self):
-        attrs = {
-            "host": self.target[CONF_HOST],
-            "device_name": self.target.get("device_name", self.target[CONF_HOST]),
-            "monitored_services": []
-        }
-
-        for coord in self._coordinators:
-            service = {
-                "protocol": coord.target[CONF_PROTOCOL],
-                "status": "Connected" if coord.data and coord.data.get("connected") else "Disconnected"
-            }
-
-            if coord.target[CONF_PROTOCOL] not in [PROTOCOL_ICMP, PROTOCOL_AD_DC]:
-                service["port"] = coord.target[CONF_PORT]
-
-            if coord.data and coord.data.get("latency") is not None:
-                service["latency_ms"] = coord.data["latency"]
-
-            attrs["monitored_services"].append(service)
-
-        return attrs
-
-class OverAllSensor(CoordinatorEntity, SensorEntity):
-    """Overview sensor representing all sensors for a device."""
-
-    def __init__(self, coordinator: ConnectivityCoordinator, target: dict, all_coordinators: list) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
-        self.target = target
-        self._coordinators = [coord for coord in all_coordinators
-                            if coord.target[CONF_HOST] == target[CONF_HOST]]
-
-        device_name = target.get("device_name", target[CONF_HOST])
-        entity_id_name = (device_name.lower()
-                         .replace(' ', '_')
-                         .replace('-', '_')
-                         .replace('.', '_')
-                         .replace('(', '')
-                         .replace(')', '')
-                         .replace('[', '')
-                         .replace(']', '')
-                         .replace('/', '_')
-                         .replace('\\', '_')
-                         .replace('@', '_at_')
-                         .replace('&', '_and_'))
-
-        self._attr_name = f"{device_name} Overall"
-        self.entity_id = f"sensor.connectivity_monitor_{entity_id_name}_overall"
-        self._attr_unique_id = f"{target[CONF_HOST]}_overall"
-
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, target[CONF_HOST])},
-            name=device_name,
-            manufacturer="Connectivity Monitor",
-            model="Network Monitor",
-            configuration_url=f"http://{target[CONF_HOST]}",
-            suggested_area="Network"
-        )
-
-    @property
-    def available(self) -> bool:
-        return True
-
-    @property
-    def native_value(self):
-        """Return overall connection status."""
-        if not self._coordinators:
-            return "Unknown"
-
-        return "Connected" if all(
-            coord.data and coord.data.get("connected", False)
-            for coord in self._coordinators
-        ) else "Disconnected"
-
-    @property
-    def icon(self):
-        """Return the icon."""
-        if self.native_value == "Connected":
-            return "mdi:lan-check"
-        return "mdi:lan-disconnect"
-
-    @property
-    def extra_state_attributes(self):
-        """Return overview attributes."""
         attrs = {
             "host": self.target[CONF_HOST],
             "device_name": self.target.get("device_name", self.target[CONF_HOST]),
