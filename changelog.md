@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00013 | 03/12/2024 | changed default interval to 300 seconds |
 | 0.1.00012 | 02/12/2024 | changed back all devices to one integration config, but allowing to adding devices through `ADD DEVICE` or `ADD INTEGRATION` buttons and allowing to remove devices and sensors through `CONFIGURE` button |
 | 0.1.00011 | 02/12/2024 | fixed issues after moved each device to a separate config and added an Overall sensor per device |
 | 0.1.00010 | 02/12/2024 | moved each device to a separate config and added an Overall sensor per device |
