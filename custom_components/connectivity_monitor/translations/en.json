@@ -30,26 +30,51 @@
                 "data": {
                     "interval": "Update interval"
                 }
+            },
+            "user": {
+                "title": "Add New Device",
+                "data": {
+                    "host": "Host (IP or FQDN)",
+                    "device_name": "Device Name (optional)",
+                    "protocol": "Protocol"
+                }
             }
         },
         "error": {
             "invalid_dns_server": "Invalid DNS server IP address"
+        },
+        "abort": {
+            "device_added_to_existing": "Added to existing device configuration",
+            "device_added": "Device has been added to existing configuration"
         }
     },
     "options": {
         "step": {
             "menu": {
-                "title": "Configure Connectivity Monitor",
-                "description": "Targets: {target_count}\nInterval: {interval} seconds\nDNS Server: {dns_server}",
+                "title": "Modify Connectivity Monitor",
                 "data": {
                     "next_step": "Choose action"
                 }
             },
-            "dns_server": {
-                "title": "Change DNS Server",
-                "description": "Current DNS server: {current_dns}",
+            "remove_device": {
+                "title": "Remove Device",
+                "description": "Choose device to remove. All sensors for this device will be removed.",
                 "data": {
-                    "dns_server": "New DNS Server IP"
+                    "device": "Device to remove"
+                }
+            },
+            "remove_sensor": {
+                "title": "Remove Sensor",
+                "description": "Choose single sensor to remove.",
+                "data": {
+                    "sensor": "Sensor to remove"
+                }
+            },
+            "settings": {
+                "title": "Settings",
+                "data": {
+                    "interval": "Update interval (seconds)",
+                    "dns_server": "DNS Server"
                 }
             }
         },
