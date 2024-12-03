@@ -6,7 +6,7 @@ DOMAIN = "connectivity_monitor"
 
 DEFAULT_PORT = 80
 DEFAULT_PROTOCOL = "TCP"
-DEFAULT_INTERVAL = 30
+DEFAULT_INTERVAL = 300
 
 CONF_HOST = "host"
 CONF_PROTOCOL = "protocol"

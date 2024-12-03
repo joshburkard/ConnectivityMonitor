@@ -5,6 +5,13 @@ import logging
 import socket
 from typing import Any
 
+try:
+    import dns.resolver
+    import dns.exception
+    HAVE_DNS = True
+except ImportError:
+    HAVE_DNS = False
+
 from ping3 import ping
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
@@ -46,49 +53,56 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
+    """Set up the Connectivity Monitor sensors."""
     entity_registry = async_get_entity_registry(hass)
     device_registry = async_get_device_registry(hass)
     update_interval = entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL)
     dns_server = entry.data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER)
 
+    # Check all existing entries for this integration
+    existing_hosts = {}
+    for config_entry in hass.config_entries.async_entries(DOMAIN):
+        if config_entry.entry_id != entry.entry_id:  # Look at other entries
+            for target in config_entry.data.get(CONF_TARGETS, []):
+                if target[CONF_HOST] not in existing_hosts:
+                    existing_hosts[target[CONF_HOST]] = target.get("device_name", target[CONF_HOST])
+
+    # Get current targets
+    targets = entry.data[CONF_TARGETS]
     coordinators = {}
     entities = []
-    targets = entry.data[CONF_TARGETS]
-    current_hosts = {target[CONF_HOST] for target in targets}
 
     # Create sensors for each target
     for target in targets:
         host = target[CONF_HOST]
+
+        # If host exists in another config entry, use that device name
+        if host in existing_hosts:
+            target["device_name"] = existing_hosts[host]
+
         coordinator = ConnectivityCoordinator(hass, target, update_interval, dns_server)
         await coordinator.async_config_entry_first_refresh()
 
         if host not in coordinators:
             coordinators[host] = []
         coordinators[host].append(coordinator)
+
+        # Create sensor with the proper device grouping
         entities.append(ConnectivitySensor(coordinator, target))
 
-    # Create overview sensors
+    # Create overview sensors (one per unique host)
     for host, host_coordinators in coordinators.items():
+        # Use the first target for this host as base configuration
         base_target = next(target for target in targets if target[CONF_HOST] == host)
         overview_coordinator = ConnectivityCoordinator(hass, base_target, update_interval, dns_server)
         await overview_coordinator.async_config_entry_first_refresh()
         entities.append(OverviewSensor(overview_coordinator, base_target, host_coordinators))
 
-    # Clean up unused entities
-    current_unique_ids = set()
-    for target in targets:
-        current_unique_ids.add(f"{target[CONF_HOST]}_{target[CONF_PROTOCOL]}_{target.get(CONF_PORT, 'ping')}")
-        current_unique_ids.add(f"{target[CONF_HOST]}_overview")
-
-    entity_entries = async_entries_for_config_entry(entity_registry, entry.entry_id)
-    for entity_entry in entity_entries:
-        if entity_entry.unique_id not in current_unique_ids:
-            entity_registry.async_remove(entity_entry.entity_id)
-
     async_add_entities(entities)
 
 class ConnectivityCoordinator(DataUpdateCoordinator):
     def __init__(self, hass: HomeAssistant, target: dict, update_interval: int, dns_server: str) -> None:
+        """Initialize the coordinator."""
         super().__init__(
             hass,
             _LOGGER,
@@ -100,6 +114,24 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
         self._last_state = False
         self._resolved_ip = None
         self._dns_server = dns_server
+        self._resolver = None
+
+    async def _get_resolver(self):
+        """Get a DNS resolver in executor."""
+        if not HAVE_DNS:
+            return None
+
+        if self._resolver is None:
+            def _create_resolver():
+                resolver = dns.resolver.Resolver()
+                resolver.nameservers = [self._dns_server]
+                resolver.timeout = 2
+                resolver.lifetime = 4
+                return resolver
+
+            self._resolver = await self.hass.async_add_executor_job(_create_resolver)
+
+        return self._resolver
 
     async def _resolve_host(self, hostname: str) -> str | None:
         """Resolve hostname to IP address."""
@@ -117,17 +149,18 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
             except (socket.error, ValueError):
                 pass
 
-            # DNS resolution using configured DNS server
-            import dns.resolver
-            resolver = dns.resolver.Resolver()
-            resolver.nameservers = [self._dns_server]
-            resolver.timeout = 2
-            resolver.lifetime = 4
+            resolver = await self._get_resolver()
+            if not resolver:
+                return hostname
 
+            # DNS resolution using configured DNS server
             def _do_resolve():
-                answers = resolver.resolve(hostname, "A")
-                if answers:
-                    return str(answers[0])
+                try:
+                    answers = resolver.resolve(hostname, "A")
+                    if answers:
+                        return str(answers[0])
+                except Exception:
+                    pass
                 return None
 
             result = await self.hass.async_add_executor_job(_do_resolve)
@@ -142,11 +175,13 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
             return hostname
 
     async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch data from the target."""
         protocol = self.target[CONF_PROTOCOL]
         host = self.target[CONF_HOST]
         result = {"connected": False, "latency": None, "resolved_ip": None}
 
         try:
+            # Resolve hostname if needed
             if not self._resolved_ip:
                 self._resolved_ip = await self._resolve_host(host)
                 if not self._resolved_ip:
@@ -212,31 +247,34 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
         super().__init__(coordinator)
         self.target = target
 
+        # Get device name (either from existing device or from config)
         device_name = target.get("device_name", target[CONF_HOST])
-        formatted_host = target[CONF_HOST].replace('.', '_')
+        safe_device_name = device_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
 
+        # Create name based on protocol
         if target[CONF_PROTOCOL] == PROTOCOL_ICMP:
             self._attr_name = "ICMP (Ping)"
-            entity_id_suffix = f"{formatted_host}_icmp"
+            entity_id_suffix = "icmp"
         elif target[CONF_PROTOCOL] == PROTOCOL_AD_DC:
             self._attr_name = "Active Directory DC"
-            entity_id_suffix = f"{formatted_host}_ad_dc"
+            entity_id_suffix = "ad_dc"
         else:
             self._attr_name = f"{target[CONF_PROTOCOL]} {target[CONF_PORT]}"
-            entity_id_suffix = f"{formatted_host}_{target[CONF_PROTOCOL].lower()}_{target[CONF_PORT]}"
+            entity_id_suffix = f"{target[CONF_PROTOCOL].lower()}_{target[CONF_PORT]}"
 
-        self.entity_id = f"sensor.connectivity_monitor_{entity_id_suffix}"
-
+        # Set entity_id and unique_id
+        self.entity_id = f"sensor.connectivity_monitor_{safe_device_name}_{entity_id_suffix}"
         self._attr_unique_id = f"{target[CONF_HOST]}_{target[CONF_PROTOCOL]}_{target.get(CONF_PORT, 'ping')}"
 
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, target[CONF_HOST])},
-            name=device_name,
-            manufacturer="Connectivity Monitor",
-            model="Network Monitor",
-            configuration_url=f"http://{target[CONF_HOST]}",
-            suggested_area="Network"
-        )
+        # Device info is crucial for grouping
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, target[CONF_HOST])},
+            "name": device_name,
+            "manufacturer": "Connectivity Monitor",
+            "model": "Network Monitor",
+            "configuration_url": f"http://{target[CONF_HOST]}",
+            "suggested_area": "Network"
+        }
 
     @property
     def available(self) -> bool:
@@ -280,20 +318,21 @@ class OverviewSensor(CoordinatorEntity, SensorEntity):
         self._coordinators = all_coordinators
 
         device_name = target.get("device_name", target[CONF_HOST])
-        formatted_host = target[CONF_HOST].replace('.', '_')
+        safe_device_name = device_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
 
         self._attr_name = "Overall"
-        self.entity_id = f"sensor.connectivity_monitor_{formatted_host}_overall"
+        self.entity_id = f"sensor.connectivity_monitor_{safe_device_name}_overall"
         self._attr_unique_id = f"{target[CONF_HOST]}_overall"
 
-        self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, target[CONF_HOST])},
-            name=device_name,
-            manufacturer="Connectivity Monitor",
-            model="Network Monitor",
-            configuration_url=f"http://{target[CONF_HOST]}",
-            suggested_area="Network"
-        )
+        # Use same device info structure as regular sensors
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, target[CONF_HOST])},
+            "name": device_name,
+            "manufacturer": "Connectivity Monitor",
+            "model": "Network Monitor",
+            "configuration_url": f"http://{target[CONF_HOST]}",
+            "suggested_area": "Network"
+        }
 
     @property
     def available(self) -> bool:
