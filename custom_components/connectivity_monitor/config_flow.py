@@ -156,10 +156,16 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Create or update the config entry."""
         device_name = self._data.get("device_name", "").strip() or self._data[CONF_HOST]
 
-        # Get or create targets list
-        targets = self._data.get(CONF_TARGETS, [])
+        # First, get a copy of the existing targets if any
+        entries = self._async_current_entries()
+        if entries:
+            entry = entries[0]
+            existing_data = dict(entry.data)
+            targets = list(existing_data[CONF_TARGETS])
+        else:
+            targets = []
 
-        # Create new target(s)
+        # Create new target
         if self._data[CONF_PROTOCOL] == PROTOCOL_AD_DC:
             targets.extend([{
                 CONF_HOST: self._data[CONF_HOST],
@@ -173,6 +179,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_PROTOCOL: self._data[CONF_PROTOCOL],
                 "device_name": device_name
             }
+            # Only add port for TCP/UDP
             if self._data[CONF_PROTOCOL] in [PROTOCOL_TCP, PROTOCOL_UDP]:
                 target[CONF_PORT] = self._data[CONF_PORT]
             targets.append(target)
@@ -184,7 +191,6 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
 
         # If we have an existing entry, update it
-        entries = self._async_current_entries()
         if entries:
             entry = entries[0]
             self.hass.config_entries.async_update_entry(entry, data=data)

@@ -6,7 +6,7 @@
     "documentation": "https://github.com/joshburkard/ConnectivityMonitor",
     "iot_class": "local_polling",
     "issue_tracker": "",
-    "version": "0.1.00013",
+    "version": "0.1.00014",
     "requirements": [
         "ping3==4.0.4",
         "dnspython==2.4.2"

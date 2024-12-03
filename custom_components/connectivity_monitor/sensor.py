@@ -56,47 +56,80 @@ async def async_setup_entry(
     """Set up the Connectivity Monitor sensors."""
     entity_registry = async_get_entity_registry(hass)
     device_registry = async_get_device_registry(hass)
-    update_interval = entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL)
-    dns_server = entry.data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER)
 
-    # Check all existing entries for this integration
-    existing_hosts = {}
-    for config_entry in hass.config_entries.async_entries(DOMAIN):
-        if config_entry.entry_id != entry.entry_id:  # Look at other entries
-            for target in config_entry.data.get(CONF_TARGETS, []):
-                if target[CONF_HOST] not in existing_hosts:
-                    existing_hosts[target[CONF_HOST]] = target.get("device_name", target[CONF_HOST])
+    # Ensure we have all required fields in the config
+    config_data = dict(entry.data)
+    needs_update = False
 
-    # Get current targets
-    targets = entry.data[CONF_TARGETS]
+    # Ensure we have the new fields while keeping existing data
+    if CONF_TARGETS not in config_data:
+        config_data[CONF_TARGETS] = []
+        needs_update = True
+    if CONF_INTERVAL not in config_data:
+        config_data[CONF_INTERVAL] = DEFAULT_INTERVAL
+        needs_update = True
+    if CONF_DNS_SERVER not in config_data:
+        config_data[CONF_DNS_SERVER] = DEFAULT_DNS_SERVER
+        needs_update = True
+
+    # If we needed to add fields, update the entry
+    if needs_update:
+        hass.config_entries.async_update_entry(entry, data=config_data)
+
+    update_interval = config_data[CONF_INTERVAL]
+    dns_server = config_data[CONF_DNS_SERVER]
+    targets = config_data[CONF_TARGETS]
+
+    # Store coordinators per host and AD coordinators per host
     coordinators = {}
+    ad_coordinators = {}
     entities = []
 
     # Create sensors for each target
     for target in targets:
         host = target[CONF_HOST]
-
-        # If host exists in another config entry, use that device name
-        if host in existing_hosts:
-            target["device_name"] = existing_hosts[host]
-
         coordinator = ConnectivityCoordinator(hass, target, update_interval, dns_server)
         await coordinator.async_config_entry_first_refresh()
 
         if host not in coordinators:
             coordinators[host] = []
+            ad_coordinators[host] = []
+
         coordinators[host].append(coordinator)
 
-        # Create sensor with the proper device grouping
+        # If this is an AD port, store in AD coordinators
+        if target.get(CONF_PORT, None) in AD_DC_PORTS:
+            ad_coordinators[host].append(coordinator)
+
         entities.append(ConnectivitySensor(coordinator, target))
 
-    # Create overview sensors (one per unique host)
+    # Create overview sensors for each host
     for host, host_coordinators in coordinators.items():
-        # Use the first target for this host as base configuration
         base_target = next(target for target in targets if target[CONF_HOST] == host)
+
+        # Create AD overview sensor if host has AD ports
+        if host in ad_coordinators and ad_coordinators[host]:
+            ad_coordinator = ConnectivityCoordinator(hass, base_target, update_interval, dns_server)
+            await ad_coordinator.async_config_entry_first_refresh()
+            entities.append(ADOverviewSensor(ad_coordinator, base_target, ad_coordinators[host]))
+
+        # Create regular overall sensor
         overview_coordinator = ConnectivityCoordinator(hass, base_target, update_interval, dns_server)
         await overview_coordinator.async_config_entry_first_refresh()
         entities.append(OverviewSensor(overview_coordinator, base_target, host_coordinators))
+
+    # Clean up entities
+    current_unique_ids = set()
+    for target in targets:
+        current_unique_ids.add(f"{target[CONF_HOST]}_{target[CONF_PROTOCOL]}_{target.get(CONF_PORT, 'ping')}")
+        current_unique_ids.add(f"{target[CONF_HOST]}_overall")
+        if any(t.get(CONF_PORT, None) in AD_DC_PORTS for t in targets if t[CONF_HOST] == target[CONF_HOST]):
+            current_unique_ids.add(f"{target[CONF_HOST]}_ad_overview")
+
+    entity_entries = async_entries_for_config_entry(entity_registry, entry.entry_id)
+    for entity_entry in entity_entries:
+        if entity_entry.unique_id not in current_unique_ids:
+            entity_registry.async_remove(entity_entry.entity_id)
 
     async_add_entities(entities)
 
@@ -375,5 +408,71 @@ class OverviewSensor(CoordinatorEntity, SensorEntity):
                 service["latency_ms"] = coord.data["latency"]
 
             attrs["monitored_services"].append(service)
+
+        return attrs
+
+class ADOverviewSensor(CoordinatorEntity, SensorEntity):
+    """Overview sensor specifically for Active Directory status."""
+
+    def __init__(self, coordinator: ConnectivityCoordinator, target: dict, ad_coordinators: list) -> None:
+        super().__init__(coordinator)
+        self.target = target
+        self._coordinators = ad_coordinators
+
+        device_name = target.get("device_name", target[CONF_HOST])
+        safe_device_name = device_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
+
+        self._attr_name = "Active Directory"
+        self.entity_id = f"sensor.connectivity_monitor_{safe_device_name}_ad"
+        self._attr_unique_id = f"{target[CONF_HOST]}_ad_overview"
+
+        self._attr_device_info = {
+            "identifiers": {(DOMAIN, target[CONF_HOST])},
+            "name": device_name,
+            "manufacturer": "Connectivity Monitor",
+            "model": "Network Monitor",
+            "configuration_url": f"http://{target[CONF_HOST]}",
+            "suggested_area": "Network"
+        }
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self):
+        if not self._coordinators:
+            return "Not Connected"
+
+        return "Connected" if all(
+            coord.data and coord.data.get("connected", False)
+            for coord in self._coordinators
+        ) else "Not Connected"
+
+    @property
+    def icon(self):
+        if self.native_value == "Connected":
+            return "mdi:domain"
+        return "mdi:domain-off"
+
+    @property
+    def extra_state_attributes(self):
+        attrs = {
+            "host": self.target[CONF_HOST],
+            "device_name": self.target.get("device_name", self.target[CONF_HOST]),
+            "ad_services": []
+        }
+
+        for coord in self._coordinators:
+            service = {
+                "port": coord.target[CONF_PORT],
+                "service": AD_DC_PORTS.get(coord.target[CONF_PORT], "Unknown Service"),
+                "status": "Connected" if coord.data and coord.data.get("connected") else "Not Connected"
+            }
+
+            if coord.data and coord.data.get("latency") is not None:
+                service["latency_ms"] = coord.data["latency"]
+
+            attrs["ad_services"].append(service)
 
         return attrs
