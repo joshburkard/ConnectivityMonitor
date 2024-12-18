@@ -299,15 +299,28 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
         self.entity_id = f"sensor.connectivity_monitor_{safe_device_name}_{entity_id_suffix}"
         self._attr_unique_id = f"{target[CONF_HOST]}_{target[CONF_PROTOCOL]}_{target.get(CONF_PORT, 'ping')}"
 
-        # Device info is crucial for grouping
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, target[CONF_HOST])},
+        hardware_info = [
+            # "Network Monitor",
+            f"{self.target[CONF_HOST]}"
+        ]
+        if (self.coordinator.data and self.coordinator.data.get("resolved_ip") and self.coordinator.data["resolved_ip"] != self.target[CONF_HOST]):
+            hardware_info.append(f"IP: {self.coordinator.data['resolved_ip']}")
+
+        # Base device info
+        device_info = {
+            "identifiers": {(DOMAIN, self.target[CONF_HOST])},
             "name": device_name,
             "manufacturer": "Connectivity Monitor",
             "model": "Network Monitor",
-            "configuration_url": f"http://{target[CONF_HOST]}",
-            "suggested_area": "Network"
+            "configuration_url": f"http://{self.target[CONF_HOST]}",
+            "suggested_area": "Network",
+            "hw_version": ", ".join(hardware_info),
+            "connections": {
+                ("network_host", self.target[CONF_HOST])
+            }
         }
+
+        self._attr_device_info = device_info
 
     @property
     def available(self) -> bool:
@@ -357,15 +370,28 @@ class OverviewSensor(CoordinatorEntity, SensorEntity):
         self.entity_id = f"sensor.connectivity_monitor_{safe_device_name}_overall"
         self._attr_unique_id = f"{target[CONF_HOST]}_overall"
 
-        # Use same device info structure as regular sensors
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, target[CONF_HOST])},
+        hardware_info = [
+            # "Network Monitor",
+            f"{self.target[CONF_HOST]}"
+        ]
+        if (self.coordinator.data and self.coordinator.data.get("resolved_ip") and self.coordinator.data["resolved_ip"] != self.target[CONF_HOST]):
+            hardware_info.append(f"IP: {self.coordinator.data['resolved_ip']}")
+
+        # Base device info
+        device_info = {
+            "identifiers": {(DOMAIN, self.target[CONF_HOST])},
             "name": device_name,
             "manufacturer": "Connectivity Monitor",
             "model": "Network Monitor",
-            "configuration_url": f"http://{target[CONF_HOST]}",
-            "suggested_area": "Network"
+            "configuration_url": f"http://{self.target[CONF_HOST]}",
+            "suggested_area": "Network",
+            "hw_version": ", ".join(hardware_info),
+            "connections": {
+                ("network_host", self.target[CONF_HOST])
+            }
         }
+
+        self._attr_device_info = device_info
 
     @property
     def available(self) -> bool:
@@ -426,14 +452,28 @@ class ADOverviewSensor(CoordinatorEntity, SensorEntity):
         self.entity_id = f"sensor.connectivity_monitor_{safe_device_name}_ad"
         self._attr_unique_id = f"{target[CONF_HOST]}_ad_overview"
 
-        self._attr_device_info = {
-            "identifiers": {(DOMAIN, target[CONF_HOST])},
+        hardware_info = [
+            # "Network Monitor",
+            f"{self.target[CONF_HOST]}"
+        ]
+        if (self.coordinator.data and self.coordinator.data.get("resolved_ip") and self.coordinator.data["resolved_ip"] != self.target[CONF_HOST]):
+            hardware_info.append(f"IP: {self.coordinator.data['resolved_ip']}")
+
+        # Base device info
+        device_info = {
+            "identifiers": {(DOMAIN, self.target[CONF_HOST])},
             "name": device_name,
             "manufacturer": "Connectivity Monitor",
             "model": "Network Monitor",
-            "configuration_url": f"http://{target[CONF_HOST]}",
-            "suggested_area": "Network"
+            "configuration_url": f"http://{self.target[CONF_HOST]}",
+            "suggested_area": "Network",
+            "hw_version": ", ".join(hardware_info),
+            "connections": {
+                ("network_host", self.target[CONF_HOST])
+            }
         }
+
+        self._attr_device_info = device_info
 
     @property
     def available(self) -> bool:
