@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00016 | 31/12/2024 | link devices of differemt integrations together |
 | 0.1.00015 | 18/12/2024 | added host and ip address to device information |
 | 0.1.00014 | 03/12/2024 | added overall sensor for Active Directory |
 | 0.1.00013 | 03/12/2024 | changed default interval to 300 seconds |
