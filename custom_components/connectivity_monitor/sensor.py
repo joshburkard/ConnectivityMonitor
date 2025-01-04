@@ -85,10 +85,16 @@ async def async_setup_entry(
 
         # Create coordinators and sensors for each target
         device_coordinators = []
+        ad_coordinators = []  # Keep track of AD coordinators separately
+
         for target in host_target_list:
             coordinator = ConnectivityCoordinator(hass, target, update_interval, dns_server)
             await coordinator.async_config_entry_first_refresh()
             device_coordinators.append(coordinator)
+
+            # Track AD coordinators separately
+            if target[CONF_PROTOCOL] == PROTOCOL_TCP and target.get(CONF_PORT) in AD_DC_PORTS:
+                ad_coordinators.append(coordinator)
 
             # Create individual protocol sensor
             sensor = ConnectivitySensor(coordinator, target)
@@ -104,6 +110,13 @@ async def async_setup_entry(
             entities.append(overview)
             new_unique_ids.add(overview.unique_id)
             _LOGGER.debug("Created overview sensor for %s", host)
+
+            # Create AD overview sensor if we have AD coordinators
+            if ad_coordinators:
+                ad_overview = ADOverviewSensor(overview_coordinator, host_target_list[0], ad_coordinators)
+                entities.append(ad_overview)
+                new_unique_ids.add(ad_overview.unique_id)
+                _LOGGER.debug("Created AD overview sensor for %s", host)
 
     # Clean up old entities that are no longer in the configuration
     for entity in existing_entities:
@@ -566,62 +579,95 @@ class ADOverviewSensor(CoordinatorEntity, SensorEntity):
     """Overview sensor specifically for Active Directory status."""
 
     def __init__(self, coordinator: ConnectivityCoordinator, target: dict, ad_coordinators: list) -> None:
+        """Initialize the AD overview sensor."""
         super().__init__(coordinator)
         self.target = target
         self._coordinators = ad_coordinators
+        self._attr_available = True
 
         device_name = target.get("device_name", target[CONF_HOST])
         safe_device_name = device_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
 
         self._attr_name = "Active Directory"
         self.entity_id = f"sensor.connectivity_monitor_{safe_device_name}_ad"
-        self._attr_unique_id = f"{target[CONF_HOST]}_ad_overview"
 
-        hardware_info = [
-            # "Network Monitor",
-            f"{self.target[CONF_HOST]}"
-        ]
-        if (self.coordinator.data and self.coordinator.data.get("resolved_ip") and self.coordinator.data["resolved_ip"] != self.target[CONF_HOST]):
-            hardware_info.append(f"IP: {self.coordinator.data['resolved_ip']}")
+        # Get data from coordinator
+        coord_data = coordinator.data or {}
+        mac_address = coord_data.get("mac_address")
+        ip_address = coord_data.get("resolved_ip")
 
-        # Base device info
+        # Set unique_id with prefix
+        if mac_address:
+            base_id = mac_address.lower().replace(':', '')
+        elif ip_address:
+            base_id = ip_address.replace('.', '_')
+        else:
+            base_id = target[CONF_HOST].replace('.', '_')
+
+        self._attr_unique_id = f"connectivity_{base_id}_ad"
+
+        # Set up device connections for linking
+        connections = set()
+
+        # Add MAC connection if available (for linking with other integrations)
+        if mac_address:
+            connections.add(("mac", mac_address.lower().replace(':', '')))
+
+        # Add IP and hostname connections
+        if ip_address:
+            connections.add(("ip", ip_address))
+        connections.add(("hostname", target[CONF_HOST]))
+
+        # Create device info
         device_info = {
-            "identifiers": {(DOMAIN, self.target[CONF_HOST])},
             "name": device_name,
             "manufacturer": "Connectivity Monitor",
             "model": "Network Monitor",
-            "configuration_url": f"http://{self.target[CONF_HOST]}",
-            "suggested_area": "Network",
-            "hw_version": ", ".join(hardware_info),
-            "connections": {
-                ("network_host", self.target[CONF_HOST])
-            }
+            "sw_version": "0.1.00016",
+            "connections": connections,
+            # Add identifiers if we don't have MAC address to prevent device not being created
+            "identifiers": {(DOMAIN, mac_address.lower().replace(':', ''))} if mac_address else {(DOMAIN, target[CONF_HOST])}
         }
 
         self._attr_device_info = device_info
 
     @property
     def available(self) -> bool:
-        return True
+        """Return if entity is available."""
+        return self._attr_available
 
     @property
     def native_value(self):
+        """Return the state of the sensor."""
         if not self._coordinators:
             return "Not Connected"
 
-        return "Connected" if all(
-            coord.data and coord.data.get("connected", False)
-            for coord in self._coordinators
-        ) else "Not Connected"
+        all_connected = True
+        any_connected = False
+        for coord in self._coordinators:
+            if coord.data and coord.data.get("connected"):
+                any_connected = True
+            else:
+                all_connected = False
+
+        if all_connected:
+            return "Connected"
+        elif any_connected:
+            return "Partially Connected"
+        return "Not Connected"
 
     @property
     def icon(self):
+        """Return the icon to use in the frontend."""
         if self.native_value == "Connected":
             return "mdi:domain"
+        elif self.native_value == "Partially Connected":
+            return "mdi:domain-alert"
         return "mdi:domain-off"
 
     @property
     def extra_state_attributes(self):
+        """Return additional attributes."""
         attrs = {
             "host": self.target[CONF_HOST],
             "device_name": self.target.get("device_name", self.target[CONF_HOST]),
