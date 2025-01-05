@@ -1,4 +1,19 @@
 """Constants for the Connectivity Monitor integration."""
+import json
+import os
+from datetime import timedelta
+
+DOMAIN = "connectivity_monitor"
+
+# Load version from manifest.json
+MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "manifest.json")
+try:
+    with open(MANIFEST_PATH) as manifest_file:
+        manifest = json.load(manifest_file)
+        VERSION = manifest.get("version", "0.0.0")
+except Exception as err:
+    VERSION = "0.0.0"
+
 from datetime import timedelta
 
 DOMAIN = "connectivity_monitor"
