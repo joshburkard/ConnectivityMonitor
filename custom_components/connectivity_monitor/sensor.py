@@ -36,6 +36,7 @@ from homeassistant.helpers.device_registry import async_get as async_get_device_
 
 from .const import (
     DOMAIN,
+    VERSION,
     CONF_HOST,
     CONF_PROTOCOL,
     CONF_PORT,
@@ -633,7 +634,7 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
             name=device_name,
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
-            sw_version="0.1.00018",
+            sw_version=VERSION,
             connections=connections,
         )
 
@@ -719,7 +720,7 @@ class OverviewSensor(CoordinatorEntity, SensorEntity):
             name=device_name,
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
-            sw_version="0.1.00018",
+            sw_version=VERSION,
             connections=connections,
         )
 
@@ -829,7 +830,7 @@ class ADOverviewSensor(CoordinatorEntity, SensorEntity):
             name=device_name,
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
-            sw_version="0.1.00018",
+            sw_version=VERSION,
             connections=connections,
         )
 
