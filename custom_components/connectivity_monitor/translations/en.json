@@ -33,19 +33,23 @@
             },
             "user": {
                 "title": "Add New Device",
+                "description": "Configure a new device to monitor",
                 "data": {
                     "host": "Host (IP or FQDN)",
                     "device_name": "Device Name (optional)",
-                    "protocol": "Protocol"
+                    "protocol": "Protocol",
+                    "alert_group": "Alert Group (optional)",
+                    "alert_delay": "Alert Delay in minutes (optional)"
                 }
             }
         },
         "error": {
+            "unknown": "Unexpected error occurred. Please check Home Assistant logs.",
             "invalid_dns_server": "Invalid DNS server IP address"
         },
         "abort": {
-            "device_added_to_existing": "Added to existing device configuration",
-            "device_added": "Device has been added to existing configuration"
+            "device_added": "Device has been added successfully",
+            "device_added_to_existing": "Added to existing device configuration"
         }
     },
     "options": {
@@ -54,6 +58,21 @@
                 "title": "Modify Connectivity Monitor",
                 "data": {
                     "next_step": "Choose action"
+                }
+            },
+            "device_select": {
+                "title": "Select Device",
+                "description": "Choose which device to modify alert settings for",
+                "data": {
+                    "device": "Device"
+                }
+            },
+            "alert_config": {
+                "title": "Alert Configuration",
+                "description": "Configure alert settings for the selected device",
+                "data": {
+                    "alert_group": "Alert Group",
+                    "alert_delay": "Alert Delay (minutes)"
                 }
             },
             "remove_device": {
@@ -79,6 +98,7 @@
             }
         },
         "error": {
+            "no_notify_groups": "No notification groups found. Please set up notification groups in Home Assistant first.",
             "invalid_dns_server": "Invalid DNS server IP address"
         }
     }

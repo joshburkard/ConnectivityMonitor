@@ -13,6 +13,7 @@ from .const import DOMAIN, CONF_TARGETS
 
 _LOGGER = logging.getLogger(__name__)
 
+# We only need the sensor platform since alerts are handled within the sensor code
 PLATFORMS: list[Platform] = [Platform.SENSOR]
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -23,7 +24,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Connectivity Monitor from a config entry."""
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = entry.data[CONF_TARGETS]
+    hass.data[DOMAIN][entry.entry_id] = entry.data
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
