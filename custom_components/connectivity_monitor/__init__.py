@@ -1,13 +1,24 @@
 """The Connectivity Monitor integration."""
 from __future__ import annotations
 
+import logging
+import voluptuous as vol
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN, CONF_TARGETS
 
+_LOGGER = logging.getLogger(__name__)
+
 PLATFORMS: list[Platform] = [Platform.SENSOR]
+
+async def async_setup(hass: HomeAssistant, config: dict) -> bool:
+    """Set up the Connectivity Monitor component."""
+    hass.data.setdefault(DOMAIN, {})
+    return True
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Connectivity Monitor from a config entry."""

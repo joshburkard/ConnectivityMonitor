@@ -111,12 +111,12 @@ async def async_setup_entry(
             new_unique_ids.add(overview.unique_id)
             _LOGGER.debug("Created overview sensor for %s", host)
 
-            # Create AD overview sensor if we have AD coordinators
-            if ad_coordinators:
-                ad_overview = ADOverviewSensor(overview_coordinator, host_target_list[0], ad_coordinators)
-                entities.append(ad_overview)
-                new_unique_ids.add(ad_overview.unique_id)
-                _LOGGER.debug("Created AD overview sensor for %s", host)
+        # Create AD overview sensor if we have AD coordinators
+        if ad_coordinators:
+            ad_overview = ADOverviewSensor(overview_coordinator, host_target_list[0], ad_coordinators)
+            entities.append(ad_overview)
+            new_unique_ids.add(ad_overview.unique_id)
+            _LOGGER.debug("Created AD overview sensor for %s", host)
 
     # Clean up old entities that are no longer in the configuration
     for entity in existing_entities:
@@ -633,8 +633,7 @@ class ADOverviewSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def available(self) -> bool:
-        """Return if entity is available."""
-        return self._attr_available
+        return True
 
     @property
     def native_value(self):
@@ -642,19 +641,10 @@ class ADOverviewSensor(CoordinatorEntity, SensorEntity):
         if not self._coordinators:
             return "Not Connected"
 
-        all_connected = True
-        any_connected = False
-        for coord in self._coordinators:
-            if coord.data and coord.data.get("connected"):
-                any_connected = True
-            else:
-                all_connected = False
-
-        if all_connected:
-            return "Connected"
-        elif any_connected:
-            return "Partially Connected"
-        return "Not Connected"
+        return "Connected" if all(
+            coord.data and coord.data.get("connected", False)
+            for coord in self._coordinators
+        ) else "Not Connected"
 
     @property
     def icon(self):
