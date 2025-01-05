@@ -2,6 +2,8 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00019 | 05/01/2025 | added action for alert notification |
+| 0.1.00018 | 05/01/2025 | added Alert Notification group and Alert delay to each device |
 | 0.1.00017 | 04/01/2025 | fixed issue with AD Overview sensor |
 | 0.1.00016 | 31/12/2024 | link devices of differemt integrations together |
 | 0.1.00015 | 18/12/2024 | added host and ip address to device information |
