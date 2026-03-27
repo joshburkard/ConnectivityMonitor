@@ -273,6 +273,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         if user_input is not None:
             if user_input["next_step"] == "modify_alerts":
                 return await self.async_step_device_select()
+            elif user_input["next_step"] == "rename_device":
+                return await self.async_step_rename_device_select()
             elif user_input["next_step"] == "remove_device":
                 return await self.async_step_remove_device()
             elif user_input["next_step"] == "remove_sensor":
@@ -285,11 +287,107 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             data_schema=vol.Schema({
                 vol.Required("next_step"): vol.In({
                     "modify_alerts": "Modify Alert Settings",
+                    "rename_device": "Change Host / Device Name",
                     "remove_device": "Remove Device",
                     "remove_sensor": "Remove Single Sensor",
                     "settings": "Change Settings"
                 })
             })
+        )
+
+    async def async_step_rename_device_select(self, user_input=None):
+        """Select which device to rename."""
+        devices = {}
+        for target in self._targets:
+            device_host = target[CONF_HOST]
+            if device_host not in devices:
+                device_name = target.get("device_name", device_host)
+                devices[device_host] = device_name
+
+        if user_input is not None:
+            self._selected_device = user_input["device"]
+            return await self.async_step_rename_host()
+
+        return self.async_show_form(
+            step_id="rename_device_select",
+            data_schema=vol.Schema({
+                vol.Required("device"): vol.In(
+                    {host: f"{name} ({host})" for host, name in devices.items()}
+                )
+            })
+        )
+
+    async def async_step_rename_host(self, user_input=None):
+        """Enter the new host IP/FQDN and device name."""
+        errors = {}
+
+        # Find current device name for the selected device
+        current_device_name = self._selected_device
+        for target in self._targets:
+            if target[CONF_HOST] == self._selected_device:
+                current_device_name = target.get("device_name", self._selected_device)
+                break
+
+        if user_input is not None:
+            new_host = user_input[CONF_HOST].strip()
+            new_device_name = user_input.get("device_name", "").strip() or new_host
+
+            if not new_host:
+                errors[CONF_HOST] = "invalid_host"
+            else:
+                old_host = self._selected_device
+                entity_registry = async_get_entity_registry(self.hass)
+                device_registry = async_get_device_registry(self.hass)
+                entry_entities = async_entries_for_config_entry(
+                    entity_registry, self.config_entry.entry_id
+                )
+
+                # Find device_ids for the old host via entity state attributes.
+                # Each sensor stores "host" in its attributes, so this works
+                # regardless of whether the device is keyed by MAC or by host.
+                old_device_ids = set()
+                for entity_entry in entry_entities:
+                    state = self.hass.states.get(entity_entry.entity_id)
+                    if state and state.attributes.get("host") == old_host:
+                        if entity_entry.device_id:
+                            old_device_ids.add(entity_entry.device_id)
+
+                # Fallback: identifier-based lookup for devices that were never polled
+                if not old_device_ids:
+                    for device_entry in device_registry.devices.values():
+                        for identifier in device_entry.identifiers:
+                            if identifier[0] == DOMAIN and identifier[1] == old_host:
+                                old_device_ids.add(device_entry.id)
+                                break
+
+                # Update all targets that belong to the old host
+                for target in self._targets:
+                    if target[CONF_HOST] == old_host:
+                        target[CONF_HOST] = new_host
+                        target["device_name"] = new_device_name
+
+                # Save updated config
+                self.config_data[CONF_TARGETS] = self._targets
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data=self.config_data
+                )
+
+                # Remove old device registry entries. Entity registry cleanup
+                # is handled automatically by sensor.py during the reload below.
+                for device_id in old_device_ids:
+                    device_registry.async_remove_device(device_id)
+
+                await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+                return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="rename_host",
+            data_schema=vol.Schema({
+                vol.Required(CONF_HOST, default=self._selected_device): str,
+                vol.Optional("device_name", default=current_device_name): str,
+            }),
+            errors=errors
         )
 
     async def async_step_device_select(self, user_input=None):

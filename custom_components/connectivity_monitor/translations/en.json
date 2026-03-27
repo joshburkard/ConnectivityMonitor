@@ -89,6 +89,21 @@
                     "sensor": "Sensor to remove"
                 }
             },
+            "rename_device_select": {
+                "title": "Change Host Address / Device Name",
+                "description": "Choose which device to update",
+                "data": {
+                    "device": "Device"
+                }
+            },
+            "rename_host": {
+                "title": "Change Host Address / Device Name",
+                "description": "Enter the new host IP or FQDN for this device",
+                "data": {
+                    "host": "New Host (IP or FQDN)",
+                    "device_name": "Device Name (optional)"
+                }
+            },
             "settings": {
                 "title": "Settings",
                 "data": {
@@ -99,7 +114,8 @@
         },
         "error": {
             "no_notify_groups": "No notification groups found. Please set up notification groups in Home Assistant first.",
-            "invalid_dns_server": "Invalid DNS server IP address"
+            "invalid_dns_server": "Invalid DNS server IP address",
+            "invalid_host": "Host cannot be empty"
         }
     }
 }
