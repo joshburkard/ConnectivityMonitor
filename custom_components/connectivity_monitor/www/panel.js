@@ -28,9 +28,21 @@
       this.attachShadow({ mode: "open" });
       this._hass = null;
       this._lastFingerprint = null;
-      // Delegated click handler wired once
+      // Tracks which device entity-ids are manually collapsed/expanded.
+      // null = not yet initialised (use default based on status).
+      this._collapsed = null;
+
       this.shadowRoot.addEventListener("click", (e) => {
-        // Device header → navigate to device page
+        // Toggle chevron click - collapse/expand sensor list
+        const toggleEl = e.target.closest("[data-toggle]");
+        if (toggleEl) {
+          e.stopPropagation();
+          const key = toggleEl.dataset.toggle;
+          this._collapsed.has(key) ? this._collapsed.delete(key) : this._collapsed.add(key);
+          this._applyCollapse();
+          return;
+        }
+        // Device header click → navigate to device page
         const deviceEl = e.target.closest("[data-device]");
         if (deviceEl) {
           e.stopPropagation();
@@ -38,7 +50,7 @@
           window.dispatchEvent(new CustomEvent("location-changed"));
           return;
         }
-        // Sensor row → open more-info dialog
+        // Sensor row click → open more-info dialog
         const entityEl = e.target.closest("[data-entity]");
         if (entityEl) {
           e.stopPropagation();
@@ -53,9 +65,6 @@
 
     set hass(hass) {
       this._hass = hass;
-      // Only re-render when a connectivity_monitor sensor state actually changed.
-      // HA calls set hass() on every state change in the whole system, so without
-      // this guard the DOM is replaced mid-click, breaking the event handler.
       const fingerprint = Object.entries(hass.states)
         .filter(([id]) => id.startsWith("sensor.connectivity_monitor_"))
         .map(([id, s]) => id + "=" + s.state)
@@ -66,45 +75,33 @@
       this._render();
     }
 
-    set panel(panel) {
-      this._panel = panel;
-    }
+    set panel(panel) { this._panel = panel; }
 
-    connectedCallback() {
-      this._render();
-    }
+    connectedCallback() { this._render(); }
 
     _getDeviceData() {
       if (!this._hass) return { groups: [], totalDevices: 0 };
-
       const states = this._hass.states;
       const devices = [];
 
       for (const [entityId, state] of Object.entries(states)) {
-        if (
-          !entityId.startsWith("sensor.connectivity_monitor_") ||
-          !entityId.endsWith("_overall")
-        ) continue;
+        if (!entityId.startsWith("sensor.connectivity_monitor_") || !entityId.endsWith("_overall")) continue;
 
-        const host          = state.attributes.host || "";
-        const deviceName    = state.attributes.device_name || host;
-        const overallStatus = state.state || "Unknown";
+        const host            = state.attributes.host || "";
+        const deviceName      = state.attributes.device_name || host;
+        const overallStatus   = state.state || "Unknown";
         const overallEntityId = entityId;
 
         const sensors = Object.values(states).filter((s) => {
           const id = s.entity_id;
-          return (
-            id.startsWith("sensor.connectivity_monitor_") &&
-            !id.endsWith("_overall") &&
-            !id.endsWith("_ad") &&
-            s.attributes.host === host
-          );
+          return id.startsWith("sensor.connectivity_monitor_") &&
+            !id.endsWith("_overall") && !id.endsWith("_ad") &&
+            s.attributes.host === host;
         });
 
-        // Sort sensors: failing first, then alphabetically by entity_id
         sensors.sort((a, b) => {
-          const aFail = a.state === "Disconnected" || a.state === "Not Connected" ? 0 : 1;
-          const bFail = b.state === "Disconnected" || b.state === "Not Connected" ? 0 : 1;
+          const aFail = (a.state === "Disconnected" || a.state === "Not Connected") ? 0 : 1;
+          const bFail = (b.state === "Disconnected" || b.state === "Not Connected") ? 0 : 1;
           return aFail !== bFail ? aFail - bFail : a.entity_id.localeCompare(b.entity_id);
         });
 
@@ -113,9 +110,8 @@
 
       const groupMap = {};
       for (const device of devices) {
-        const key = device.overallStatus;
-        if (!groupMap[key]) groupMap[key] = [];
-        groupMap[key].push(device);
+        if (!groupMap[device.overallStatus]) groupMap[device.overallStatus] = [];
+        groupMap[device.overallStatus].push(device);
       }
 
       const groups = Object.entries(groupMap)
@@ -126,6 +122,32 @@
         }));
 
       return { groups, totalDevices: devices.length };
+    }
+
+    _initCollapsed(groups) {
+      // First render only: collapse healthy devices, expand problem devices
+      if (this._collapsed !== null) return;
+      this._collapsed = new Set();
+      for (const group of groups) {
+        if (group.status === "Connected") {
+          for (const device of group.devices) {
+            this._collapsed.add(device.overallEntityId);
+          }
+        }
+      }
+    }
+
+    _applyCollapse() {
+      if (!this.shadowRoot) return;
+      this.shadowRoot.querySelectorAll("[data-toggle]").forEach((btn) => {
+        const key       = btn.dataset.toggle;
+        const card      = btn.closest(".device-card");
+        const list      = card && card.querySelector(".sensor-list");
+        const collapsed = this._collapsed.has(key);
+        btn.innerHTML   = collapsed ? "\u25b6" : "\u25bc";
+        btn.title       = collapsed ? "Expand" : "Collapse";
+        if (list) list.style.display = collapsed ? "none" : "";
+      });
     }
 
     _renderSensor(sensor) {
@@ -165,7 +187,6 @@
         ? "<span class=\"device-badge badge-error\">" + esc(failCount) + "&nbsp;failed</span>"
         : "<span class=\"device-badge badge-ok\">OK</span>";
 
-      // Resolve device_id via hass.entities (available in HA 2022+)
       let deviceAttr = "data-entity=\"" + esc(device.overallEntityId) + "\"";
       if (this._hass && this._hass.entities) {
         const entry = this._hass.entities[device.overallEntityId];
@@ -174,9 +195,13 @@
         }
       }
 
+      const chevron  = this._collapsed.has(device.overallEntityId) ? "\u25b6" : "\u25bc";
+      const chevronTitle = this._collapsed.has(device.overallEntityId) ? "Expand" : "Collapse";
+
       return "<div class=\"device-card card-" + meta.css + "\">" +
-        "<div class=\"device-header clickable\" " + deviceAttr + ">" +
-          "<div class=\"device-info\">" +
+        "<div class=\"device-header\">" +
+          "<button class=\"toggle-btn\" data-toggle=\"" + esc(device.overallEntityId) + "\" title=\"" + chevronTitle + "\">" + chevron + "</button>" +
+          "<div class=\"device-info clickable\" " + deviceAttr + ">" +
             "<div class=\"device-name\">" + esc(device.deviceName) + "</div>" +
             "<div class=\"device-host\">" + esc(device.host) + "</div>" +
           "</div>" +
@@ -203,12 +228,12 @@
       if (!this.shadowRoot) return;
       try {
         const { groups, totalDevices } = this._getDeviceData();
+        this._initCollapsed(groups);
 
         const bodyHtml = totalDevices === 0
           ? "<div class=\"no-devices\">No devices are being monitored yet.</div>"
           : groups.map((g) => this._renderGroup(g)).join("");
 
-        // Re-set innerHTML but keep the listener (it was attached in constructor, survives innerHTML changes)
         const container = this.shadowRoot.querySelector("#cm-root");
         const root = container || document.createElement("div");
         root.id = "cm-root";
@@ -233,7 +258,11 @@
           ".card-warning { border-left-color: var(--warning-color, #ff9800); }" +
           ".card-ok      { border-left-color: var(--success-color, #4caf50); }" +
           ".card-unknown { border-left-color: var(--secondary-text-color); }" +
-          ".device-header { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; background: var(--secondary-background-color, rgba(0,0,0,.03)); border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.08)); }" +
+          ".device-header { display: flex; align-items: center; gap: 8px; padding: 8px 14px; background: var(--secondary-background-color, rgba(0,0,0,.03)); border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.08)); }" +
+          ".toggle-btn { background: none; border: none; cursor: pointer; color: var(--secondary-text-color); font-size: 0.7rem; padding: 2px 4px; flex-shrink: 0; line-height: 1; border-radius: 3px; }" +
+          ".toggle-btn:hover { background: var(--secondary-background-color, rgba(0,0,0,.08)); }" +
+          ".device-info { flex: 1; min-width: 0; cursor: pointer; }" +
+          ".device-info:hover .device-name { text-decoration: underline; }" +
           ".device-name { font-size: 0.92rem; font-weight: 500; }" +
           ".device-host { font-size: 0.75rem; color: var(--secondary-text-color); margin-top: 1px; }" +
           ".device-badge { border-radius: 20px; padding: 2px 10px; font-size: 0.73rem; font-weight: 600; white-space: nowrap; flex-shrink: 0; }" +
@@ -252,8 +281,8 @@
           ".label-warning { color: var(--warning-color, #ff9800); }" +
           ".label-ok      { color: var(--success-color, #4caf50); }" +
           ".sensor-latency { font-size: 0.75rem; color: var(--secondary-text-color); white-space: nowrap; flex-shrink: 0; }" +
-          ".clickable { cursor: pointer; transition: background 0.15s; }" +
-          ".clickable:hover { background: var(--secondary-background-color, rgba(0,0,0,.05)) !important; }" +
+          ".clickable { cursor: pointer; }" +
+          ".sensor-row.clickable:hover { background: var(--secondary-background-color, rgba(0,0,0,.05)); }" +
           ".row-arrow { font-size: 1rem; color: var(--secondary-text-color); flex-shrink: 0; margin-left: auto; padding-left: 4px; }" +
           ".no-devices { padding: 40px 20px; text-align: center; color: var(--secondary-text-color); font-size: 0.95rem; }" +
           ".error-msg { padding: 20px; color: var(--error-color, #f44336); font-size: 0.85rem; white-space: pre-wrap; }" +
@@ -265,6 +294,9 @@
           bodyHtml;
 
         if (!container) this.shadowRoot.appendChild(root);
+
+        // Apply collapse state after DOM is updated
+        this._applyCollapse();
       } catch (err) {
         this.shadowRoot.innerHTML = "<div class=\"error-msg\">Panel error: " + esc(String(err)) + "</div>";
       }
