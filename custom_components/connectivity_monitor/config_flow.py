@@ -59,7 +59,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     @callback
     def async_get_options_flow(config_entry):
         """Get the options flow for this handler."""
-        return OptionsFlowHandler(config_entry)
+        return OptionsFlowHandler()
 
     async def _async_get_notify_groups(self):
         """Get list of notification groups from Home Assistant."""
@@ -250,11 +250,10 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow."""
 
-    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+    def __init__(self) -> None:
         """Initialize options flow."""
-        self.config_entry = config_entry
-        self.config_data = dict(config_entry.data)
-        self._targets = list(self.config_data[CONF_TARGETS])
+        self.config_data = {}
+        self._targets = []
         self._selected_device = None
 
     async def _async_get_notify_groups(self):
@@ -265,6 +264,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
+        self.config_data = dict(self.config_entry.data)
+        self._targets = list(self.config_data[CONF_TARGETS])
         return await self.async_step_menu()
 
     async def async_step_menu(self, user_input=None):
