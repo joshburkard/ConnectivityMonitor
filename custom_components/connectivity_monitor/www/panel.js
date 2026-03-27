@@ -33,6 +33,14 @@
       this._collapsed = null;
 
       this.shadowRoot.addEventListener("click", (e) => {
+        // Configure button → navigate to integration page
+        const configBtn = e.target.closest("[data-action='configure']");
+        if (configBtn) {
+          e.stopPropagation();
+          history.pushState(null, "", "/config/integrations/integration/connectivity_monitor");
+          window.dispatchEvent(new CustomEvent("location-changed"));
+          return;
+        }
         // Toggle chevron click - collapse/expand sensor list
         const toggleEl = e.target.closest("[data-toggle]");
         if (toggleEl) {
@@ -241,9 +249,11 @@
           "<style>" +
           "*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }" +
           ":host { display: block; padding: 16px; background: var(--primary-background-color); min-height: 100%; font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif); color: var(--primary-text-color); }" +
-          ".page-header { padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.12)); }" +
+          ".page-header { display: flex; align-items: flex-start; justify-content: space-between; padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.12)); }" +
           ".page-title { font-size: 1.5rem; font-weight: 400; }" +
           ".page-subtitle { font-size: 0.85rem; color: var(--secondary-text-color); margin-top: 4px; }" +
+          ".configure-btn { display: flex; align-items: center; gap: 6px; background: none; border: 1px solid var(--divider-color, rgba(0,0,0,.2)); border-radius: 6px; padding: 6px 12px; cursor: pointer; color: var(--primary-text-color); font-size: 0.82rem; white-space: nowrap; flex-shrink: 0; margin-top: 2px; }" +
+          ".configure-btn:hover { background: var(--secondary-background-color, rgba(0,0,0,.05)); }" +
           ".group { margin-bottom: 20px; }" +
           ".group-header { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 6px 6px 0 0; font-size: 0.82rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }" +
           ".group-header-error   { background: rgba(244,67,54,.15);   color: var(--error-color,   #f44336); }" +
@@ -288,8 +298,11 @@
           ".error-msg { padding: 20px; color: var(--error-color, #f44336); font-size: 0.85rem; white-space: pre-wrap; }" +
           "</style>" +
           "<div class=\"page-header\">" +
-            "<div class=\"page-title\">Connectivity Monitor</div>" +
-            "<div class=\"page-subtitle\">Monitoring " + esc(totalDevices) + " device" + (totalDevices !== 1 ? "s" : "") + "</div>" +
+            "<div>" +
+              "<div class=\"page-title\">Connectivity Monitor</div>" +
+              "<div class=\"page-subtitle\">Monitoring " + esc(totalDevices) + " device" + (totalDevices !== 1 ? "s" : "") + "</div>" +
+            "</div>" +
+            "<button class=\"configure-btn\" data-action=\"configure\">&#9881;&nbsp;Configure</button>" +
           "</div>" +
           bodyHtml;
 
