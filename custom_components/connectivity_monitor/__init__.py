@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
+from datetime import datetime
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
@@ -21,10 +23,49 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     hass.data.setdefault(DOMAIN, {})
     return True
 
+async def _async_register_panel(hass: HomeAssistant) -> None:
+    """Register the Connectivity Issues sidebar panel (called once per HA startup)."""
+    from aiohttp import web
+    from homeassistant.components.http import HomeAssistantView
+    from homeassistant.components.panel_custom import async_register_panel
+
+    www_path = Path(__file__).parent / "www"
+
+    class ConnectivityMonitorJSView(HomeAssistantView):
+        """Serve the panel JS file."""
+        url = "/connectivity_monitor_panel/panel.js"
+        name = "connectivity_monitor:panel_js"
+        requires_auth = False
+
+        async def get(self, request):  # noqa: D102
+            js_file = www_path / "panel.js"
+            return web.FileResponse(js_file)
+
+    hass.http.register_view(ConnectivityMonitorJSView)
+
+    await async_register_panel(
+        hass,
+        webcomponent_name="connectivity-monitor-panel",
+        frontend_url_path="connectivity_monitor_issues",
+        module_url=f"/connectivity_monitor_panel/panel.js?v={datetime.now().strftime('%Y%m%d%H%M%S')}",
+        sidebar_title="Connectivity Monitor",
+        sidebar_icon="mdi:network-off",
+        require_admin=False,
+    )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Connectivity Monitor from a config entry."""
     hass.data.setdefault(DOMAIN, {})
     hass.data[DOMAIN][entry.entry_id] = {}
+
+    # Register the sidebar panel only once across all config entries
+    if not hass.data[DOMAIN].get("_panel_registered"):
+        try:
+            await _async_register_panel(hass)
+            hass.data[DOMAIN]["_panel_registered"] = True
+        except Exception as err:
+            _LOGGER.warning("Could not register Connectivity Issues sidebar panel: %s", err)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
