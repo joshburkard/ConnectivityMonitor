@@ -49,7 +49,7 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
         frontend_url_path="connectivity_monitor_issues",
         module_url=f"/connectivity_monitor_panel/panel.js?v={datetime.now().strftime('%Y%m%d%H%M%S')}",
         sidebar_title="Connectivity Monitor",
-        sidebar_icon="mdi:network-off",
+        sidebar_icon="mdi:lan-check",
         require_admin=False,
     )
 

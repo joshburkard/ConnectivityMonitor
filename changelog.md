@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00029 | 27/03/2026 | add labeled 'Enable Alerts' checkbox to new device and alert config flows |
 | 0.1.00028 | 27/03/2026 | add 'Configure' button in sidebar panel |
 | 0.1.00027 | 27/03/2026 | fix issue with wrong Overall sensor value |
 | 0.1.00026 | 27/03/2026 | sidebar panel: collapsible device sensor lists, healthy devices collapsed by default |

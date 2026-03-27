@@ -34,6 +34,7 @@ CONF_TARGETS = "targets"
 CONF_DNS_SERVER = "dns_server"
 CONF_ALERT_GROUP = "alert_group"
 CONF_ALERT_DELAY = "alert_delay"
+CONF_ALERTS_ENABLED = "alerts_enabled"
 
 PROTOCOL_TCP = "TCP"
 PROTOCOL_UDP = "UDP"

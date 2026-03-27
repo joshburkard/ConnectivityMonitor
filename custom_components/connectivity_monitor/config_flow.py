@@ -28,6 +28,7 @@ from .const import (
     CONF_DNS_SERVER,
     CONF_ALERT_GROUP,
     CONF_ALERT_DELAY,
+    CONF_ALERTS_ENABLED,
     DEFAULT_DNS_SERVER,
     DEFAULT_ALERT_GROUP,
     PROTOCOLS,
@@ -93,8 +94,9 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     CONF_HOST: user_input[CONF_HOST],
                     CONF_PROTOCOL: user_input[CONF_PROTOCOL],
                     "device_name": user_input.get("device_name", ""),
-                    # Only add alert group if it was provided and isn't None/empty
-                    CONF_ALERT_GROUP: user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP,
+                    # Only add alert group if alerts are enabled
+                    CONF_ALERTS_ENABLED: user_input.get(CONF_ALERTS_ENABLED, False),
+                    CONF_ALERT_GROUP: (user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP) if user_input.get(CONF_ALERTS_ENABLED) else DEFAULT_ALERT_GROUP,
                     CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
                 })
 
@@ -121,7 +123,8 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 PROTOCOL_ICMP: "ICMP (Ping)",
                 PROTOCOL_AD_DC: "Active Directory DC"
             }),
-            vol.Optional(CONF_ALERT_DELAY, default=DEFAULT_ALERT_DELAY): vol.All(
+            vol.Optional(CONF_ALERTS_ENABLED, default=False): bool,
+            vol.Required(CONF_ALERT_DELAY, default=DEFAULT_ALERT_DELAY): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
             )
         }
@@ -312,7 +315,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id="rename_device_select",
             data_schema=vol.Schema({
                 vol.Required("device"): vol.In(
-                    {host: f"{name} ({host})" for host, name in devices.items()}
+                    dict(sorted(
+                        {host: f"{name} ({host})" for host, name in devices.items()}.items(),
+                        key=lambda x: x[1].lower()
+                    ))
                 )
             })
         )
@@ -412,7 +418,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id="device_select",
             data_schema=vol.Schema({
                 vol.Required("device"): vol.In(
-                    {host: f"{info['name']} ({host})" for host, info in devices.items()}
+                    dict(sorted(
+                        {host: f"{info['name']} ({host})" for host, info in devices.items()}.items(),
+                        key=lambda x: x[1].lower()
+                    ))
                 )
             })
         )
@@ -426,6 +435,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         for target in self._targets:
             if target[CONF_HOST] == self._selected_device:
                 current_settings = {
+                    "alerts_enabled": bool(target.get(CONF_ALERT_GROUP, "")),
                     "alert_group": target.get(CONF_ALERT_GROUP, ""),
                     "alert_delay": target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
                 }
@@ -433,14 +443,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         if user_input is not None:
             # Update all targets for the selected device
-            alert_group = user_input.get(CONF_ALERT_GROUP, "")
-            # Only set alert group if one was selected
+            alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
+            alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
             for target in self._targets:
                 if target[CONF_HOST] == self._selected_device:
                     if alert_group:
                         target[CONF_ALERT_GROUP] = alert_group
                     elif CONF_ALERT_GROUP in target:
-                        # Remove alert group if none was selected
+                        # Remove alert group if alerts disabled or none selected
                         target.pop(CONF_ALERT_GROUP, None)
                     target[CONF_ALERT_DELAY] = user_input[CONF_ALERT_DELAY]
 
@@ -460,6 +470,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         notify_groups_dict[""] = "No alert group"
 
         schema = {
+            vol.Optional(CONF_ALERTS_ENABLED,
+                        default=current_settings["alerts_enabled"] if current_settings else False): bool,
             vol.Optional(CONF_ALERT_GROUP,
                         default=current_settings["alert_group"] if current_settings else ""): vol.In(
                 notify_groups_dict
@@ -528,7 +540,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             step_id="remove_device",
             data_schema=vol.Schema({
                 vol.Required("device"): vol.In(
-                    {host: f"{name} ({host})" for host, name in devices.items()}
+                    dict(sorted(
+                        {host: f"{name} ({host})" for host, name in devices.items()}.items(),
+                        key=lambda x: x[1].lower()
+                    ))
                 )
             })
         )
@@ -584,7 +599,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="remove_sensor",
             data_schema=vol.Schema({
-                vol.Required("sensor"): vol.In(sensors)
+                vol.Required("sensor"): vol.In(
+                    dict(sorted(sensors.items(), key=lambda x: x[1].lower()))
+                )
             })
         )
 
@@ -640,7 +657,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         schema = {
             vol.Required("device"): vol.In(
-                {host: f"{info['name']} ({host})" for host, info in devices.items()}
+                dict(sorted(
+                    {host: f"{info['name']} ({host})" for host, info in devices.items()}.items(),
+                    key=lambda x: x[1].lower()
+                ))
             ),
             vol.Optional(CONF_ALERT_GROUP,
                         default=selected_device["alert_group"] if selected_device else DEFAULT_ALERT_GROUP): vol.In(

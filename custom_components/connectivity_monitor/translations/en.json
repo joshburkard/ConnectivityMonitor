@@ -38,6 +38,7 @@
                     "host": "Host (IP or FQDN)",
                     "device_name": "Device Name (optional)",
                     "protocol": "Protocol",
+                    "alerts_enabled": "Enable Alerts",
                     "alert_group": "Alert Group (optional)",
                     "alert_delay": "Alert Delay in minutes (optional)"
                 }
@@ -71,6 +72,7 @@
                 "title": "Alert Configuration",
                 "description": "Configure alert settings for the selected device",
                 "data": {
+                    "alerts_enabled": "Enable Alerts",
                     "alert_group": "Alert Group",
                     "alert_delay": "Alert Delay (minutes)"
                 }
