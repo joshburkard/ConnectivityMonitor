@@ -747,6 +747,15 @@ class OverviewSensor(CoordinatorEntity, SensorEntity):
             connections=connections,
         )
 
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to all device coordinators when added to hass."""
+        await super().async_added_to_hass()
+        for coord in self._device_coordinators:
+            if coord is not self.coordinator:
+                self.async_on_remove(
+                    coord.async_add_listener(self.async_write_ha_state)
+                )
+
     @property
     def native_value(self) -> str:
         """Return the state of the sensor."""
@@ -862,6 +871,15 @@ class ADOverviewSensor(CoordinatorEntity, SensorEntity):
             sw_version=VERSION,
             connections=connections,
         )
+
+    async def async_added_to_hass(self) -> None:
+        """Subscribe to all AD coordinators when added to hass."""
+        await super().async_added_to_hass()
+        for coord in self._coordinators:
+            if coord is not self.coordinator:
+                self.async_on_remove(
+                    coord.async_add_listener(self.async_write_ha_state)
+                )
 
     @property
     def native_value(self) -> str:

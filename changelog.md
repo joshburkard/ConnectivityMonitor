@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00027 | 27/03/2026 | fix issue with wrong Overall sensor value |
 | 0.1.00026 | 27/03/2026 | sidebar panel: collapsible device sensor lists, healthy devices collapsed by default |
 | 0.1.00025 | 27/03/2026 | sidebar panel: show all devices grouped by status, clickable device/sensor rows open more-info dialog |
 | 0.1.00024 | 27/03/2026 | added Connectivity Issues sidebar panel showing all devices and sensors with connectivity problems |
