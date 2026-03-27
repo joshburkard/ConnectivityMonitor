@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00025 | 27/03/2026 | sidebar panel: show all devices grouped by status, clickable device/sensor rows open more-info dialog |
 | 0.1.00024 | 27/03/2026 | added Connectivity Issues sidebar panel showing all devices and sensors with connectivity problems |
 | 0.1.00023 | 27/03/2026 | display device address in device info and optimize reload of custom component |
 | 0.1.00022 | 27/03/2026 | added posibility to change host address / device name |

@@ -1,14 +1,12 @@
 (() => {
   if (customElements.get("connectivity-monitor-panel")) return;
 
-  // HTML escape to prevent XSS when rendering state data
   const esc = (s) =>
     String(s == null ? "" : s).replace(
       /[&<>"']/g,
       (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
     );
 
-  // Status hierarchy for sorting groups (worst first)
   const STATUS_ORDER = {
     Disconnected: 0,
     "Not Connected": 1,
@@ -29,10 +27,42 @@
       super();
       this.attachShadow({ mode: "open" });
       this._hass = null;
+      this._lastFingerprint = null;
+      // Delegated click handler wired once
+      this.shadowRoot.addEventListener("click", (e) => {
+        // Device header → navigate to device page
+        const deviceEl = e.target.closest("[data-device]");
+        if (deviceEl) {
+          e.stopPropagation();
+          history.pushState(null, "", "/config/devices/device/" + deviceEl.dataset.device);
+          window.dispatchEvent(new CustomEvent("location-changed"));
+          return;
+        }
+        // Sensor row → open more-info dialog
+        const entityEl = e.target.closest("[data-entity]");
+        if (entityEl) {
+          e.stopPropagation();
+          this.dispatchEvent(new CustomEvent("hass-more-info", {
+            bubbles: true,
+            composed: true,
+            detail: { entityId: entityEl.dataset.entity },
+          }));
+        }
+      });
     }
 
     set hass(hass) {
       this._hass = hass;
+      // Only re-render when a connectivity_monitor sensor state actually changed.
+      // HA calls set hass() on every state change in the whole system, so without
+      // this guard the DOM is replaced mid-click, breaking the event handler.
+      const fingerprint = Object.entries(hass.states)
+        .filter(([id]) => id.startsWith("sensor.connectivity_monitor_"))
+        .map(([id, s]) => id + "=" + s.state)
+        .sort()
+        .join("|");
+      if (fingerprint === this._lastFingerprint) return;
+      this._lastFingerprint = fingerprint;
       this._render();
     }
 
@@ -48,9 +78,8 @@
       if (!this._hass) return { groups: [], totalDevices: 0 };
 
       const states = this._hass.states;
-
-      // Build device list from _overall sensors (one per device)
       const devices = [];
+
       for (const [entityId, state] of Object.entries(states)) {
         if (
           !entityId.startsWith("sensor.connectivity_monitor_") ||
@@ -60,8 +89,8 @@
         const host          = state.attributes.host || "";
         const deviceName    = state.attributes.device_name || host;
         const overallStatus = state.state || "Unknown";
+        const overallEntityId = entityId;
 
-        // Collect individual sensors for this host
         const sensors = Object.values(states).filter((s) => {
           const id = s.entity_id;
           return (
@@ -72,10 +101,16 @@
           );
         });
 
-        devices.push({ host, deviceName, overallStatus, sensors });
+        // Sort sensors: failing first, then alphabetically by entity_id
+        sensors.sort((a, b) => {
+          const aFail = a.state === "Disconnected" || a.state === "Not Connected" ? 0 : 1;
+          const bFail = b.state === "Disconnected" || b.state === "Not Connected" ? 0 : 1;
+          return aFail !== bFail ? aFail - bFail : a.entity_id.localeCompare(b.entity_id);
+        });
+
+        devices.push({ host, deviceName, overallStatus, overallEntityId, sensors });
       }
 
-      // Group devices by their overall status
       const groupMap = {};
       for (const device of devices) {
         const key = device.overallStatus;
@@ -83,7 +118,6 @@
         groupMap[key].push(device);
       }
 
-      // Sort groups worst-first, devices within each group alphabetically
       const groups = Object.entries(groupMap)
         .sort(([a], [b]) => (STATUS_ORDER[a] ?? 99) - (STATUS_ORDER[b] ?? 99))
         .map(([status, devs]) => ({
@@ -104,7 +138,7 @@
       const port    = sensor.attributes.port;
       const service = sensor.attributes.service;
       let protoLabel;
-      if (service)   protoLabel = proto + " \u2013 " + esc(service) + " (" + esc(port) + ")";
+      if (service)   protoLabel = esc(proto) + " \u2013 " + esc(service) + " (" + esc(port) + ")";
       else if (port) protoLabel = esc(proto) + ":" + esc(port);
       else           protoLabel = esc(proto);
 
@@ -112,11 +146,12 @@
         ? "<span class=\"sensor-latency\">" + esc(sensor.attributes.latency_ms) + "&nbsp;ms</span>"
         : "";
 
-      return "<div class=\"sensor-row\">" +
+      return "<div class=\"sensor-row clickable\" data-entity=\"" + esc(sensor.entity_id) + "\">" +
         "<span class=\"sensor-dot dot-" + dotCss + "\"></span>" +
         "<span class=\"sensor-proto\">" + protoLabel + "</span>" +
         "<span class=\"sensor-state label-" + dotCss + "\">" + esc(st) + "</span>" +
         latencyHtml +
+        "<span class=\"row-arrow\">\u203a</span>" +
         "</div>";
     }
 
@@ -126,12 +161,21 @@
       const failCount   = device.sensors.filter(
         (s) => s.state === "Disconnected" || s.state === "Not Connected"
       ).length;
-      const badgeHtml   = failCount > 0
+      const badgeHtml = failCount > 0
         ? "<span class=\"device-badge badge-error\">" + esc(failCount) + "&nbsp;failed</span>"
         : "<span class=\"device-badge badge-ok\">OK</span>";
 
+      // Resolve device_id via hass.entities (available in HA 2022+)
+      let deviceAttr = "data-entity=\"" + esc(device.overallEntityId) + "\"";
+      if (this._hass && this._hass.entities) {
+        const entry = this._hass.entities[device.overallEntityId];
+        if (entry && entry.device_id) {
+          deviceAttr = "data-device=\"" + esc(entry.device_id) + "\"";
+        }
+      }
+
       return "<div class=\"device-card card-" + meta.css + "\">" +
-        "<div class=\"device-header\">" +
+        "<div class=\"device-header clickable\" " + deviceAttr + ">" +
           "<div class=\"device-info\">" +
             "<div class=\"device-name\">" + esc(device.deviceName) + "</div>" +
             "<div class=\"device-host\">" + esc(device.host) + "</div>" +
@@ -164,7 +208,11 @@
           ? "<div class=\"no-devices\">No devices are being monitored yet.</div>"
           : groups.map((g) => this._renderGroup(g)).join("");
 
-        this.shadowRoot.innerHTML =
+        // Re-set innerHTML but keep the listener (it was attached in constructor, survives innerHTML changes)
+        const container = this.shadowRoot.querySelector("#cm-root");
+        const root = container || document.createElement("div");
+        root.id = "cm-root";
+        root.innerHTML =
           "<style>" +
           "*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }" +
           ":host { display: block; padding: 16px; background: var(--primary-background-color); min-height: 100%; font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif); color: var(--primary-text-color); }" +
@@ -177,8 +225,7 @@
           ".group-header-warning { background: rgba(255,152,0,.15);   color: var(--warning-color, #ff9800); }" +
           ".group-header-ok      { background: rgba(76,175,80,.12);   color: var(--success-color, #4caf50); }" +
           ".group-header-unknown { background: rgba(128,128,128,.12); color: var(--secondary-text-color); }" +
-          ".group-icon { font-size: 0.95rem; }" +
-          ".group-label { flex: 1; }" +
+          ".group-icon { font-size: 0.95rem; } .group-label { flex: 1; }" +
           ".group-count { background: rgba(0,0,0,.12); border-radius: 10px; padding: 1px 8px; font-size: 0.78rem; }" +
           ".device-card { background: var(--card-background-color, #fff); margin-bottom: 4px; box-shadow: var(--ha-card-box-shadow, 0 1px 4px rgba(0,0,0,.08)); overflow: hidden; border-left: 4px solid transparent; }" +
           ".device-card:last-child { margin-bottom: 0; border-radius: 0 0 6px 6px; }" +
@@ -205,6 +252,9 @@
           ".label-warning { color: var(--warning-color, #ff9800); }" +
           ".label-ok      { color: var(--success-color, #4caf50); }" +
           ".sensor-latency { font-size: 0.75rem; color: var(--secondary-text-color); white-space: nowrap; flex-shrink: 0; }" +
+          ".clickable { cursor: pointer; transition: background 0.15s; }" +
+          ".clickable:hover { background: var(--secondary-background-color, rgba(0,0,0,.05)) !important; }" +
+          ".row-arrow { font-size: 1rem; color: var(--secondary-text-color); flex-shrink: 0; margin-left: auto; padding-left: 4px; }" +
           ".no-devices { padding: 40px 20px; text-align: center; color: var(--secondary-text-color); font-size: 0.95rem; }" +
           ".error-msg { padding: 20px; color: var(--error-color, #f44336); font-size: 0.85rem; white-space: pre-wrap; }" +
           "</style>" +
@@ -213,6 +263,8 @@
             "<div class=\"page-subtitle\">Monitoring " + esc(totalDevices) + " device" + (totalDevices !== 1 ? "s" : "") + "</div>" +
           "</div>" +
           bodyHtml;
+
+        if (!container) this.shadowRoot.appendChild(root);
       } catch (err) {
         this.shadowRoot.innerHTML = "<div class=\"error-msg\">Panel error: " + esc(String(err)) + "</div>";
       }
