@@ -17,12 +17,23 @@ this features are already integrated:
 - allows to add later more targets or remove them again
 - allows to use a custom DNS server to resolve FQDN
 
+## Example
+
+### Overview Panel
+
+![Overview Panel](images/example-001.png)
+
+### Device View
+
+![Device-View](images/example-002.png)
+
 ## Setup
 
 Recommended to be installed via [HACS](https://github.com/hacs/integration)
 
 1. Go to HACS -> Integrations
-2. [Add this repo to your HACS custom repositories](https://hacs.xyz/docs/faq/custom_repositories)
+2. Add this repo to your HACS custom repositories:
+    - [https://github.com/joshburkard/ConnectivityMonitor](https://github.com/joshburkard/ConnectivityMonitor)
 3. Search for "Connectivity Monitor" and install.
 4. Restart Home Assistant
 5. Open Home Assistant Settings -> Devices & Serivces
@@ -34,10 +45,6 @@ Recommended to be installed via [HACS](https://github.com/hacs/integration)
 11. if you want to monitor additional targets check the checkbox `another` and click on `Submit`
 12. configure the interval and click on `Submit`
 13. done, if you want to edit your settings, you can click on your integration on on `CONFIGURE`
-
-## more documentation
-
-you can find more documentation [here](doc/examples.md)
 
 ## Change Log
 
