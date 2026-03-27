@@ -4,6 +4,7 @@ import re
 from datetime import timedelta
 import logging
 import socket
+from ipaddress import ip_address as _parse_ip_address
 from typing import Any
 from datetime import datetime
 from homeassistant.core import callback
@@ -77,6 +78,7 @@ async def async_setup_entry(
 
     # Create alert handler
     alert_handler = AlertHandler(hass)
+    hass.data[DOMAIN][entry.entry_id]["alert_handler"] = alert_handler
 
     # Get existing entities
     entity_registry = async_get_entity_registry(hass)
@@ -207,6 +209,15 @@ class AlertHandler:
             async_check,
             timedelta(minutes=1)
         )
+
+    async def async_cleanup(self) -> None:
+        """Cancel the periodic timer and all state-change callbacks."""
+        if self._check_timer:
+            self._check_timer()
+            self._check_timer = None
+        for unsubscribe in self._callbacks.values():
+            unsubscribe()
+        self._callbacks.clear()
 
     async def _check_alerts(self) -> None:
         """Check all monitored entities for alerts."""
@@ -628,12 +639,18 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
             connections.add(("mac", mac_address.lower()))
         if ip_address:
             connections.add(("ip", ip_address))
+        try:
+            _parse_ip_address(target[CONF_HOST])
+            connections.add(("ip", target[CONF_HOST]))
+        except ValueError:
+            connections.add(("hostname", target[CONF_HOST]))
 
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, mac_address.lower().replace(':', '')) if mac_address else (DOMAIN, target[CONF_HOST])},
             name=device_name,
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
+            hw_version=target[CONF_HOST],
             sw_version=VERSION,
             connections=connections,
         )
@@ -714,12 +731,18 @@ class OverviewSensor(CoordinatorEntity, SensorEntity):
             connections.add(("mac", mac_address.lower()))
         if ip_address:
             connections.add(("ip", ip_address))
+        try:
+            _parse_ip_address(target[CONF_HOST])
+            connections.add(("ip", target[CONF_HOST]))
+        except ValueError:
+            connections.add(("hostname", target[CONF_HOST]))
 
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, mac_address.lower().replace(':', '')) if mac_address else (DOMAIN, target[CONF_HOST])},
             name=device_name,
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
+            hw_version=target[CONF_HOST],
             sw_version=VERSION,
             connections=connections,
         )
@@ -824,12 +847,18 @@ class ADOverviewSensor(CoordinatorEntity, SensorEntity):
             connections.add(("mac", mac_address.lower()))
         if ip_address:
             connections.add(("ip", ip_address))
+        try:
+            _parse_ip_address(target[CONF_HOST])
+            connections.add(("ip", target[CONF_HOST]))
+        except ValueError:
+            connections.add(("hostname", target[CONF_HOST]))
 
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, mac_address.lower().replace(':', '')) if mac_address else (DOMAIN, target[CONF_HOST])},
             name=device_name,
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
+            hw_version=target[CONF_HOST],
             sw_version=VERSION,
             connections=connections,
         )

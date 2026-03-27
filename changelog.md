@@ -2,6 +2,9 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00023 | 27/03/2026 | display device address in device info and optimize reload of custom component |
+| 0.1.00022 | 27/03/2026 | added posibility to change host address / device name |
+| 0.1.00021 | 27/03/2026 | fixed issue with config flow in newer Home Assistant |
 | 0.1.00020 | 05/01/2025 | fixed Firmware version in device info |
 | 0.1.00019 | 05/01/2025 | added action for alert notification |
 | 0.1.00018 | 05/01/2025 | added Alert Notification group and Alert delay to each device |

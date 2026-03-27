@@ -24,13 +24,20 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Connectivity Monitor from a config entry."""
     hass.data.setdefault(DOMAIN, {})
-    hass.data[DOMAIN][entry.entry_id] = entry.data
+    hass.data[DOMAIN][entry.entry_id] = {}
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
+    # Clean up alert handler before unloading platforms to stop any
+    # in-flight callbacks from firing during teardown.
+    entry_data = hass.data[DOMAIN].get(entry.entry_id, {})
+    alert_handler = entry_data.get("alert_handler")
+    if alert_handler:
+        await alert_handler.async_cleanup()
+
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id)
