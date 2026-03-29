@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00033 | 28/03/2026 | add alert settings for ZigBee devices |
 | 0.1.00032 | 28/03/2026 | moved "Add ZigBee Device (ZHA)" to "Add Entry" button and removed it from the "Configure" button |
 | 0.1.00031 | 28/03/2026 | merge ZigBee (ZHA) devices with other devices and move sensors to diagnostic category |
 | 0.1.00030 | 28/03/2026 | added support for monitoring ZigBee (ZHA) devices |

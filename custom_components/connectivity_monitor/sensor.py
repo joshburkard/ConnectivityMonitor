@@ -187,6 +187,8 @@ async def async_setup_entry(
             new_unique_ids.add(sensor.unique_id)
             _LOGGER.debug("Created ZHA sensor: entity_id=%s, unique_id=%s",
                          sensor.entity_id, sensor.unique_id)
+            if target.get(CONF_ALERT_GROUP):
+                await alert_handler.async_setup_alerts(sensor.entity_id, coordinator)
         except Exception as err:
             _LOGGER.exception("Error creating ZHA sensor for target %s: %s", target, err)
 
@@ -268,10 +270,14 @@ class AlertHandler:
 
             if elapsed_minutes >= alert_delay:
                 state = self.hass.states.get(entity_id)
-                if state and state.state in ["Disconnected", "Not Connected", "Partially Connected"]:
+                is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+                problem_states = ["Inactive"] if is_zha else ["Disconnected", "Not Connected", "Partially Connected"]
+                if state and state.state in problem_states:
+                    identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST]) if is_zha else target[CONF_HOST]
+                    state_label = "inactive" if is_zha else state.state.lower()
                     message = (
-                        f"❌ Device {device_name} ({target[CONF_HOST]}) has been "
-                        f"{state.state.lower()} for {int(elapsed_minutes)} minutes"
+                        f"❌ Device {device_name} ({identifier}) has been "
+                        f"{state_label} for {int(elapsed_minutes)} minutes"
                     )
                     await self._async_send_notification(alert_group, message)
                     self._notified[entity_id] = True
@@ -297,7 +303,7 @@ class AlertHandler:
         except Exception as err:
             _LOGGER.error("Failed to send notification using service %s: %s", service, str(err))
 
-    async def async_setup_alerts(self, entity_id: str, coordinator: ConnectivityCoordinator) -> None:
+    async def async_setup_alerts(self, entity_id: str, coordinator) -> None:
         """Set up alerts for a sensor."""
         target = coordinator.target
         alert_group = target.get(CONF_ALERT_GROUP)
@@ -334,8 +340,11 @@ class AlertHandler:
                 return
 
             current_time = datetime.now()
-            problem_states = ["Disconnected", "Not Connected", "Partially Connected"]
-            device_name = target.get("device_name", target[CONF_HOST])
+            is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+            problem_states = ["Inactive"] if is_zha else ["Disconnected", "Not Connected", "Partially Connected"]
+            recovery_state = "Active" if is_zha else "Connected"
+            identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST]) if is_zha else target[CONF_HOST]
+            device_name = target.get("device_name", identifier)
 
             # Log state changes
             _LOGGER.debug(
@@ -361,11 +370,12 @@ class AlertHandler:
                     )
 
             # Device has recovered
-            elif new_state.state == "Connected":
+            elif new_state.state == recovery_state:
                 if entity_id in self._last_disconnected:
                     # Send recovery notification if we previously notified
                     if self._notified.get(entity_id):
-                        message = f"✅ Device {device_name} ({target[CONF_HOST]}) has recovered and is now connected"
+                        recover_label = "active again" if is_zha else "connected"
+                        message = f"✅ Device {device_name} ({identifier}) has recovered and is now {recover_label}"
                         await self._async_send_notification(alert_group, message)
                         _LOGGER.debug("Recovery notification sent for %s", device_name)
 
@@ -1048,6 +1058,9 @@ class ZHASensor(CoordinatorEntity, SensorEntity):
             "timeout_minutes": timeout,
             "monitor_type": "zha",
         }
+        if self.target.get(CONF_ALERT_GROUP):
+            attrs["alert_group"] = self.target[CONF_ALERT_GROUP]
+            attrs["alert_delay"] = self.target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
         if self.coordinator.data:
             raw_ts = self.coordinator.data.get("last_seen")
             if raw_ts is not None:

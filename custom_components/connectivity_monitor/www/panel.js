@@ -171,8 +171,10 @@
         const lastSeen   = state.attributes.last_seen || null;
         const minutesAgo = state.attributes.minutes_ago != null ? state.attributes.minutes_ago : null;
         const timeout    = state.attributes.timeout_minutes;
+        const alertGroup = state.attributes.alert_group || null;
+        const alertDelay = state.attributes.alert_delay != null ? state.attributes.alert_delay : null;
 
-        devices.push({ entityId, ieee, deviceName, status, lastSeen, minutesAgo, timeout });
+        devices.push({ entityId, ieee, deviceName, status, lastSeen, minutesAgo, timeout, alertGroup, alertDelay });
       }
 
       const groupMap = {};
@@ -329,8 +331,11 @@
       const timeoutHtml = device.timeout != null
         ? "<span class=\"sensor-latency\">timeout: " + esc(device.timeout) + " min</span>"
         : "";
+      const alertHtml = device.alertGroup
+        ? "<span class=\"sensor-latency\">alert: " + esc(device.alertGroup) + " (" + esc(device.alertDelay) + " min)</span>"
+        : "";
 
-      return "<div class=\"device-card card-" + meta.css + "\">" +
+      return "<div class=\"device-card card-" + meta.css + "\">" + +
         "<div class=\"device-header\">" +
           "<button class=\"toggle-btn\" data-toggle=\"" + esc(toggle) + "\" title=\"" + (collapsed ? "Expand" : "Collapse") + "\">" + chevron + "</button>" +
           "<div class=\"device-info clickable\" " + deviceAttr + ">" +
@@ -345,6 +350,7 @@
             "<span class=\"sensor-proto\">Last seen: " + esc(lastSeenLabel) + "</span>" +
             "<span class=\"sensor-state label-" + meta.css + "\">" + esc(device.status) + "</span>" +
             timeoutHtml +
+            alertHtml +
             "<span class=\"row-arrow\">\u203a</span>" +
           "</div>" +
         "</div>" +

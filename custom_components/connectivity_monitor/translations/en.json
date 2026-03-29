@@ -62,7 +62,10 @@
                 "description": "Set a friendly name and inactivity timeout for **{device_name}** ({ieee})",
                 "data": {
                     "device_name": "Device Name (optional)",
-                    "inactive_timeout": "Inactivity Timeout (minutes)"
+                    "inactive_timeout": "Inactivity Timeout (minutes)",
+                    "alerts_enabled": "Enable Alerts",
+                    "alert_group": "Alert Group",
+                    "alert_delay": "Alert Delay (minutes)"
                 }
             }
         },
@@ -142,6 +145,22 @@
                 "description": "Select the ZigBee device to stop monitoring",
                 "data": {
                     "ieee": "ZigBee Device"
+                }
+            },
+            "zha_alert_select": {
+                "title": "Modify ZigBee Alert Settings",
+                "description": "Select the ZigBee device to configure alerts for",
+                "data": {
+                    "ieee": "ZigBee Device"
+                }
+            },
+            "zha_alert_config": {
+                "title": "ZigBee Alert Configuration",
+                "description": "Configure alert settings for the selected ZigBee device",
+                "data": {
+                    "alerts_enabled": "Enable Alerts",
+                    "alert_group": "Alert Group",
+                    "alert_delay": "Alert Delay (minutes)"
                 }
             },
             "zha_select_for_timeout": {

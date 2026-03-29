@@ -212,17 +212,22 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_zha_configure(self, user_input=None):
-        """Set device name and inactivity timeout for the selected ZHA device."""
+        """Set device name, inactivity timeout, and alert settings for the selected ZHA device."""
         entries = self._async_current_entries()
 
         if user_input is not None:
             device_name = (user_input.get("device_name") or "").strip() or self._zha_selected_name
+            alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             new_target = {
                 CONF_PROTOCOL: PROTOCOL_ZHA,
                 CONF_HOST: f"zha:{self._zha_selected_ieee}",
                 CONF_ZHA_IEEE: self._zha_selected_ieee,
                 "device_name": device_name,
                 CONF_INACTIVE_TIMEOUT: user_input[CONF_INACTIVE_TIMEOUT],
+                CONF_ALERT_GROUP: (
+                    user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
+                ) if alerts_enabled else DEFAULT_ALERT_GROUP,
+                CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
             }
             if self._zha_selected_model:
                 new_target["model"] = self._zha_selected_model
@@ -239,14 +244,25 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_dns()
             return await self.async_step_finish()
 
+        notify_groups = await self._async_get_notify_groups()
+        schema = {
+            vol.Optional("device_name", default=self._zha_selected_name or ""): str,
+            vol.Required(CONF_INACTIVE_TIMEOUT, default=DEFAULT_INACTIVE_TIMEOUT): vol.All(
+                vol.Coerce(int), vol.Range(min=5, max=1440)
+            ),
+            vol.Optional(CONF_ALERTS_ENABLED, default=False): bool,
+            vol.Required(CONF_ALERT_DELAY, default=DEFAULT_ALERT_DELAY): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=60)
+            ),
+        }
+        if notify_groups:
+            notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
+            notify_groups_dict[""] = "No alert group"
+            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
+
         return self.async_show_form(
             step_id="zha_configure",
-            data_schema=vol.Schema({
-                vol.Optional("device_name", default=self._zha_selected_name or ""): str,
-                vol.Required(CONF_INACTIVE_TIMEOUT, default=DEFAULT_INACTIVE_TIMEOUT): vol.All(
-                    vol.Coerce(int), vol.Range(min=5, max=1440)
-                ),
-            }),
+            data_schema=vol.Schema(schema),
             description_placeholders={
                 "device_name": self._zha_selected_name or "",
                 "ieee": self._zha_selected_ieee or "",
@@ -405,6 +421,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_remove_zha_device()
             elif user_input["next_step"] == "zha_timeout":
                 return await self.async_step_zha_select_for_timeout()
+            elif user_input["next_step"] == "zha_alert_config":
+                return await self.async_step_zha_alert_select()
 
         return self.async_show_form(
             step_id="menu",
@@ -417,6 +435,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     "settings": "Change Settings",
                     "remove_zha_device": "Remove ZigBee Device (ZHA)",
                     "zha_timeout": "Change ZigBee Inactivity Timeout",
+                    "zha_alert_config": "Modify ZigBee Alert Settings",
                 })
             })
         )
@@ -804,6 +823,72 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="modify_alerts",
             data_schema=vol.Schema(schema)
+        )
+
+    async def async_step_zha_alert_select(self, user_input=None):
+        """Select which ZHA device to configure alerts for."""
+        zha_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
+        if not zha_targets:
+            return await self.async_step_menu()
+
+        if user_input is not None:
+            self._zha_selected_ieee = user_input["ieee"]
+            return await self.async_step_zha_alert_config()
+
+        devices = {
+            t[CONF_ZHA_IEEE]: f"{t.get('device_name', t[CONF_ZHA_IEEE])} ({t[CONF_ZHA_IEEE]})"
+            for t in sorted(zha_targets, key=lambda x: x.get("device_name", ""))
+        }
+        return self.async_show_form(
+            step_id="zha_alert_select",
+            data_schema=vol.Schema({
+                vol.Required("ieee"): vol.In(devices),
+            }),
+        )
+
+    async def async_step_zha_alert_config(self, user_input=None):
+        """Configure alert settings for the selected ZHA device."""
+        notify_groups = await self._async_get_notify_groups()
+
+        current_target = next(
+            (t for t in self._targets
+             if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee),
+            {}
+        )
+        current_alert_group = current_target.get(CONF_ALERT_GROUP, "")
+        current_alert_delay = current_target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+        current_alerts_enabled = bool(current_alert_group)
+
+        if user_input is not None:
+            alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
+            alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
+            for t in self._targets:
+                if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee:
+                    if alert_group:
+                        t[CONF_ALERT_GROUP] = alert_group
+                    else:
+                        t.pop(CONF_ALERT_GROUP, None)
+                    t[CONF_ALERT_DELAY] = user_input[CONF_ALERT_DELAY]
+
+            self.config_data[CONF_TARGETS] = self._targets
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=self.config_data
+            )
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            return self.async_create_entry(title="", data={})
+
+        notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
+        notify_groups_dict[""] = "No alert group"
+        schema = {
+            vol.Optional(CONF_ALERTS_ENABLED, default=current_alerts_enabled): bool,
+            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(notify_groups_dict),
+            vol.Required(CONF_ALERT_DELAY, default=current_alert_delay): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=60)
+            ),
+        }
+        return self.async_show_form(
+            step_id="zha_alert_config",
+            data_schema=vol.Schema(schema),
         )
 
     async def async_step_remove_zha_device(self, user_input=None):
