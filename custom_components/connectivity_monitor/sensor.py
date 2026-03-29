@@ -47,6 +47,9 @@ from .const import (
     CONF_ALERT_GROUP,
     CONF_ALERT_DELAY,
     DEFAULT_ALERT_DELAY,
+    CONF_ALERT_ACTION,
+    CONF_ALERT_ACTION_DELAY,
+    DEFAULT_ALERT_ACTION_DELAY,
     PROTOCOL_ICMP,
     PROTOCOL_AD_DC,
     PROTOCOL_TCP,
@@ -154,7 +157,7 @@ async def async_setup_entry(
                             overview.entity_id, overview.unique_id)
 
                 # Set up alerts if configured
-                if first_target.get(CONF_ALERT_GROUP):
+                if first_target.get(CONF_ALERT_GROUP) or first_target.get(CONF_ALERT_ACTION):
                     entity_id = f"sensor.connectivity_monitor_{safe_device_name}_overall"
                     await alert_handler.async_setup_alerts(entity_id, overview_coordinator)
 
@@ -168,7 +171,7 @@ async def async_setup_entry(
                     _LOGGER.debug("Created AD overview sensor: entity_id=%s, unique_id=%s",
                                 ad_overview.entity_id, ad_overview.unique_id)
 
-                    if first_target.get(CONF_ALERT_GROUP):
+                    if first_target.get(CONF_ALERT_GROUP) or first_target.get(CONF_ALERT_ACTION):
                         entity_id = f"sensor.connectivity_monitor_{safe_device_name}_ad"
                         await alert_handler.async_setup_alerts(entity_id, overview_coordinator)
 
@@ -187,7 +190,7 @@ async def async_setup_entry(
             new_unique_ids.add(sensor.unique_id)
             _LOGGER.debug("Created ZHA sensor: entity_id=%s, unique_id=%s",
                          sensor.entity_id, sensor.unique_id)
-            if target.get(CONF_ALERT_GROUP):
+            if target.get(CONF_ALERT_GROUP) or target.get(CONF_ALERT_ACTION):
                 await alert_handler.async_setup_alerts(sensor.entity_id, coordinator)
         except Exception as err:
             _LOGGER.exception("Error creating ZHA sensor for target %s: %s", target, err)
@@ -215,6 +218,7 @@ class AlertHandler:
         self.hass = hass
         self._last_disconnected = {}
         self._notified = {}
+        self._action_fired = {}
         self._callbacks = {}
         self._targets = {}  # Store target info for each entity
         self._check_timer = None
@@ -247,41 +251,84 @@ class AlertHandler:
         current_time = datetime.now()
 
         for entity_id, disconnect_time in list(self._last_disconnected.items()):
-            # Skip if already notified
-            if self._notified.get(entity_id, False):
-                continue
-
             if entity_id not in self._targets:
                 continue
 
             target = self._targets[entity_id]
-            alert_delay = target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
-            alert_group = target.get(CONF_ALERT_GROUP)
-            device_name = target.get("device_name", target[CONF_HOST])
-
+            is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+            problem_states = ["Inactive"] if is_zha else ["Disconnected", "Not Connected", "Partially Connected"]
+            identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST]) if is_zha else target[CONF_HOST]
+            device_name = target.get("device_name", identifier)
             elapsed_minutes = (current_time - disconnect_time).total_seconds() / 60
 
-            _LOGGER.debug(
-                "Timer check for %s: %.1f minutes elapsed of %d minute delay",
-                device_name,
-                elapsed_minutes,
-                alert_delay
-            )
+            _LOGGER.debug("Timer check for %s: %.1f minutes elapsed", device_name, elapsed_minutes)
 
-            if elapsed_minutes >= alert_delay:
-                state = self.hass.states.get(entity_id)
-                is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-                problem_states = ["Inactive"] if is_zha else ["Disconnected", "Not Connected", "Partially Connected"]
-                if state and state.state in problem_states:
-                    identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST]) if is_zha else target[CONF_HOST]
-                    state_label = "inactive" if is_zha else state.state.lower()
+            state = self.hass.states.get(entity_id)
+            if not state or state.state not in problem_states:
+                continue
+
+            state_label = "inactive" if is_zha else state.state.lower()
+
+            # Build context variables passed to automation/script triggers
+            last_online = disconnect_time.strftime("%Y-%m-%d %H:%M:%S")
+            if is_zha:
+                zha_last_seen = state.attributes.get("last_seen")
+                if zha_last_seen:
+                    last_online = zha_last_seen
+            context_variables = {
+                "device_name": device_name,
+                "device_address": identifier,
+                "last_online": last_online,
+                "minutes_offline": int(elapsed_minutes),
+                "hours_offline": round(elapsed_minutes / 60, 1),
+            }
+
+            # Notification alert
+            if not self._notified.get(entity_id, False):
+                alert_group = target.get(CONF_ALERT_GROUP)
+                alert_delay = target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+                if alert_group and elapsed_minutes >= alert_delay:
                     message = (
                         f"❌ Device {device_name} ({identifier}) has been "
                         f"{state_label} for {int(elapsed_minutes)} minutes"
                     )
                     await self._async_send_notification(alert_group, message)
                     self._notified[entity_id] = True
-                    _LOGGER.debug("Alert sent for %s after %.1f minutes", device_name, elapsed_minutes)
+                    _LOGGER.debug("Notification sent for %s after %.1f minutes", device_name, elapsed_minutes)
+
+            # Action alert
+            if not self._action_fired.get(entity_id, False):
+                alert_action = target.get(CONF_ALERT_ACTION)
+                action_delay = target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+                if alert_action and elapsed_minutes >= action_delay:
+                    await self._async_trigger_action(alert_action, context_variables)
+                    self._action_fired[entity_id] = True
+                    _LOGGER.debug("Action triggered for %s after %.1f minutes", device_name, elapsed_minutes)
+
+    async def _async_trigger_action(self, action_entity_id: str, variables: dict | None = None) -> None:
+        """Trigger an automation or script, optionally passing context variables."""
+        try:
+            domain = action_entity_id.split(".")[0] if "." in action_entity_id else ""
+            call_data: dict = {"entity_id": action_entity_id}
+            if variables:
+                call_data["variables"] = variables
+            if domain == "automation":
+                await self.hass.services.async_call(
+                    "automation", "trigger",
+                    call_data,
+                    blocking=True,
+                )
+            elif domain == "script":
+                await self.hass.services.async_call(
+                    "script", "turn_on",
+                    call_data,
+                    blocking=True,
+                )
+            else:
+                _LOGGER.warning("Unsupported action entity domain: %s", action_entity_id)
+            _LOGGER.debug("Successfully triggered action: %s", action_entity_id)
+        except Exception as err:
+            _LOGGER.error("Failed to trigger action %s: %s", action_entity_id, str(err))
 
     async def _async_send_notification(self, service: str, message: str) -> None:
         """Send a notification."""
@@ -307,15 +354,16 @@ class AlertHandler:
         """Set up alerts for a sensor."""
         target = coordinator.target
         alert_group = target.get(CONF_ALERT_GROUP)
+        alert_action = target.get(CONF_ALERT_ACTION)
 
-        if not alert_group:
+        if not alert_group and not alert_action:
             return
 
         _LOGGER.debug(
-            "Setting up alerts for %s with group %s and delay %d minutes",
+            "Setting up alerts for %s (group=%s, action=%s)",
             entity_id,
             alert_group,
-            target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+            alert_action,
         )
 
         # Store target info for timer checks
@@ -362,6 +410,7 @@ class AlertHandler:
                 ):
                     self._last_disconnected[entity_id] = current_time
                     self._notified[entity_id] = False
+                    self._action_fired[entity_id] = False
                     _LOGGER.debug(
                         "Started monitoring %s in %s state at %s",
                         device_name,
@@ -372,16 +421,33 @@ class AlertHandler:
             # Device has recovered
             elif new_state.state == recovery_state:
                 if entity_id in self._last_disconnected:
+                    cur_alert_group = target.get(CONF_ALERT_GROUP)
+                    cur_alert_action = target.get(CONF_ALERT_ACTION)
+                    recover_label = "active again" if is_zha else "connected"
                     # Send recovery notification if we previously notified
-                    if self._notified.get(entity_id):
-                        recover_label = "active again" if is_zha else "connected"
+                    if self._notified.get(entity_id) and cur_alert_group:
                         message = f"✅ Device {device_name} ({identifier}) has recovered and is now {recover_label}"
-                        await self._async_send_notification(alert_group, message)
+                        await self._async_send_notification(cur_alert_group, message)
                         _LOGGER.debug("Recovery notification sent for %s", device_name)
+                    # Trigger recovery action if we previously fired an action
+                    if self._action_fired.get(entity_id) and cur_alert_action:
+                        offline_since = self._last_disconnected[entity_id]
+                        offline_minutes = (datetime.now() - offline_since).total_seconds() / 60
+                        recovery_variables = {
+                            "device_name": device_name,
+                            "device_address": identifier,
+                            "last_online": offline_since.strftime("%Y-%m-%d %H:%M:%S"),
+                            "minutes_offline": int(offline_minutes),
+                            "hours_offline": round(offline_minutes / 60, 1),
+                            "recovered": True,
+                        }
+                        await self._async_trigger_action(cur_alert_action, recovery_variables)
+                        _LOGGER.debug("Recovery action triggered for %s", device_name)
 
                     # Clear tracking
                     self._last_disconnected.pop(entity_id, None)
                     self._notified[entity_id] = False
+                    self._action_fired[entity_id] = False
                     _LOGGER.debug("Cleared monitoring for %s after recovery", device_name)
 
         @callback
@@ -1061,6 +1127,9 @@ class ZHASensor(CoordinatorEntity, SensorEntity):
         if self.target.get(CONF_ALERT_GROUP):
             attrs["alert_group"] = self.target[CONF_ALERT_GROUP]
             attrs["alert_delay"] = self.target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+        if self.target.get(CONF_ALERT_ACTION):
+            attrs["alert_action"] = self.target[CONF_ALERT_ACTION]
+            attrs["alert_action_delay"] = self.target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
         if self.coordinator.data:
             raw_ts = self.coordinator.data.get("last_seen")
             if raw_ts is not None:

@@ -47,7 +47,10 @@
                     "protocol": "Protocol",
                     "alerts_enabled": "Enable Alerts",
                     "alert_group": "Alert Group (optional)",
-                    "alert_delay": "Alert Delay in minutes (optional)"
+                    "alert_delay": "Alert Delay (minutes)",
+                    "alert_action_enabled": "Enable Alert Action",
+                    "alert_action": "Alert Action (automation or script)",
+                    "alert_action_delay": "Action Delay (minutes)"
                 }
             },
             "zha_device": {
@@ -65,7 +68,10 @@
                     "inactive_timeout": "Inactivity Timeout (minutes)",
                     "alerts_enabled": "Enable Alerts",
                     "alert_group": "Alert Group",
-                    "alert_delay": "Alert Delay (minutes)"
+                    "alert_delay": "Alert Delay (minutes)",
+                    "alert_action_enabled": "Enable Alert Action",
+                    "alert_action": "Alert Action (automation or script)",
+                    "alert_action_delay": "Action Delay (minutes)"
                 }
             }
         },
@@ -101,7 +107,10 @@
                 "data": {
                     "alerts_enabled": "Enable Alerts",
                     "alert_group": "Alert Group",
-                    "alert_delay": "Alert Delay (minutes)"
+                    "alert_delay": "Alert Delay (minutes)",
+                    "alert_action_enabled": "Enable Alert Action",
+                    "alert_action": "Alert Action (automation or script)",
+                    "alert_action_delay": "Action Delay (minutes)"
                 }
             },
             "remove_device": {
@@ -160,7 +169,10 @@
                 "data": {
                     "alerts_enabled": "Enable Alerts",
                     "alert_group": "Alert Group",
-                    "alert_delay": "Alert Delay (minutes)"
+                    "alert_delay": "Alert Delay (minutes)",
+                    "alert_action_enabled": "Enable Alert Action",
+                    "alert_action": "Alert Action (automation or script)",
+                    "alert_action_delay": "Action Delay (minutes)"
                 }
             },
             "zha_select_for_timeout": {

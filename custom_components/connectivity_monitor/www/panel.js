@@ -173,8 +173,10 @@
         const timeout    = state.attributes.timeout_minutes;
         const alertGroup = state.attributes.alert_group || null;
         const alertDelay = state.attributes.alert_delay != null ? state.attributes.alert_delay : null;
+        const alertAction = state.attributes.alert_action || null;
+        const alertActionDelay = state.attributes.alert_action_delay != null ? state.attributes.alert_action_delay : null;
 
-        devices.push({ entityId, ieee, deviceName, status, lastSeen, minutesAgo, timeout, alertGroup, alertDelay });
+        devices.push({ entityId, ieee, deviceName, status, lastSeen, minutesAgo, timeout, alertGroup, alertDelay, alertAction, alertActionDelay });
       }
 
       const groupMap = {};
@@ -334,6 +336,9 @@
       const alertHtml = device.alertGroup
         ? "<span class=\"sensor-latency\">alert: " + esc(device.alertGroup) + " (" + esc(device.alertDelay) + " min)</span>"
         : "";
+      const actionHtml = device.alertAction
+        ? "<span class=\"sensor-latency\">action: " + esc(device.alertAction.split(".").slice(1).join(".") || device.alertAction) + " (" + esc(device.alertActionDelay) + " min)</span>"
+        : "";
 
       return "<div class=\"device-card card-" + meta.css + "\">" + +
         "<div class=\"device-header\">" +
@@ -351,6 +356,7 @@
             "<span class=\"sensor-state label-" + meta.css + "\">" + esc(device.status) + "</span>" +
             timeoutHtml +
             alertHtml +
+            actionHtml +
             "<span class=\"row-arrow\">\u203a</span>" +
           "</div>" +
         "</div>" +

@@ -29,6 +29,10 @@ from .const import (
     CONF_ALERT_GROUP,
     CONF_ALERT_DELAY,
     CONF_ALERTS_ENABLED,
+    CONF_ALERT_ACTION_ENABLED,
+    CONF_ALERT_ACTION,
+    CONF_ALERT_ACTION_DELAY,
+    DEFAULT_ALERT_ACTION_DELAY,
     DEFAULT_DNS_SERVER,
     DEFAULT_ALERT_GROUP,
     PROTOCOLS,
@@ -77,6 +81,17 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         groups = {name: name.replace("notify.", "") for name in notify_services.keys()}
         return groups
 
+    async def _async_get_alert_actions(self):
+        """Get available automations and scripts that can be triggered as alert actions."""
+        actions = {}
+        for state in self.hass.states.async_all():
+            entity_id = state.entity_id
+            domain = entity_id.split(".")[0]
+            if domain in ("automation", "script"):
+                name = state.attributes.get("friendly_name") or entity_id
+                actions[entity_id] = f"{name} ({entity_id})"
+        return dict(sorted(actions.items(), key=lambda x: x[1].lower()))
+
     async def async_step_user(self, user_input=None):
         """Handle a flow initiated by the user — choose device type."""
         # Check if we already have an entry and carry its settings forward
@@ -122,6 +137,11 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
                     ) if user_input.get(CONF_ALERTS_ENABLED) else DEFAULT_ALERT_GROUP,
                     CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
+                    CONF_ALERT_ACTION_ENABLED: user_input.get(CONF_ALERT_ACTION_ENABLED, False),
+                    CONF_ALERT_ACTION: (
+                        user_input.get(CONF_ALERT_ACTION, "") or ""
+                    ) if user_input.get(CONF_ALERT_ACTION_ENABLED) else "",
+                    CONF_ALERT_ACTION_DELAY: user_input.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
                 })
 
                 protocol = self._data[CONF_PROTOCOL]
@@ -136,6 +156,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
 
         notify_groups = await self._async_get_notify_groups()
+        alert_actions = await self._async_get_alert_actions()
 
         schema = {
             vol.Required(CONF_HOST): str,
@@ -156,6 +177,15 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
             notify_groups_dict[""] = "No alert group"
             schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
+
+        schema[vol.Optional(CONF_ALERT_ACTION_ENABLED, default=False)] = bool
+        schema[vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)] = vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=120)
+        )
+        if alert_actions:
+            actions_dict = {"" : "No action"}
+            actions_dict.update(alert_actions)
+            schema[vol.Optional(CONF_ALERT_ACTION, default="")] = vol.In(actions_dict)
 
         return self.async_show_form(
             step_id="network",
@@ -218,6 +248,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             device_name = (user_input.get("device_name") or "").strip() or self._zha_selected_name
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
+            action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
             new_target = {
                 CONF_PROTOCOL: PROTOCOL_ZHA,
                 CONF_HOST: f"zha:{self._zha_selected_ieee}",
@@ -228,6 +259,10 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
                 ) if alerts_enabled else DEFAULT_ALERT_GROUP,
                 CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
+                CONF_ALERT_ACTION: (
+                    user_input.get(CONF_ALERT_ACTION, "") or ""
+                ) if action_enabled else "",
+                CONF_ALERT_ACTION_DELAY: user_input.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
             }
             if self._zha_selected_model:
                 new_target["model"] = self._zha_selected_model
@@ -245,6 +280,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return await self.async_step_finish()
 
         notify_groups = await self._async_get_notify_groups()
+        alert_actions = await self._async_get_alert_actions()
         schema = {
             vol.Optional("device_name", default=self._zha_selected_name or ""): str,
             vol.Required(CONF_INACTIVE_TIMEOUT, default=DEFAULT_INACTIVE_TIMEOUT): vol.All(
@@ -259,6 +295,14 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
             notify_groups_dict[""] = "No alert group"
             schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
+        schema[vol.Optional(CONF_ALERT_ACTION_ENABLED, default=False)] = bool
+        schema[vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)] = vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=120)
+        )
+        if alert_actions:
+            actions_dict = {"" : "No action"}
+            actions_dict.update(alert_actions)
+            schema[vol.Optional(CONF_ALERT_ACTION, default="")] = vol.In(actions_dict)
 
         return self.async_show_form(
             step_id="zha_configure",
@@ -345,6 +389,8 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "device_name": device_name,
                 CONF_ALERT_GROUP: self._data.get(CONF_ALERT_GROUP, DEFAULT_ALERT_GROUP),
                 CONF_ALERT_DELAY: self._data.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
+                CONF_ALERT_ACTION: self._data.get(CONF_ALERT_ACTION, ""),
+                CONF_ALERT_ACTION_DELAY: self._data.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
             }
 
             if self._data[CONF_PROTOCOL] == PROTOCOL_AD_DC:
@@ -397,6 +443,17 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         notify_services = self.hass.services.async_services().get("notify", {})
         groups = {name: name.replace("notify.", "") for name in notify_services.keys()}
         return groups
+
+    async def _async_get_alert_actions(self):
+        """Get available automations and scripts that can be triggered as alert actions."""
+        actions = {}
+        for state in self.hass.states.async_all():
+            entity_id = state.entity_id
+            domain = entity_id.split(".")[0]
+            if domain in ("automation", "script"):
+                name = state.attributes.get("friendly_name") or entity_id
+                actions[entity_id] = f"{name} ({entity_id})"
+        return dict(sorted(actions.items(), key=lambda x: x[1].lower()))
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -575,6 +632,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_alert_config(self, user_input=None):
         """Second step of alert modification - alert settings configuration."""
         notify_groups = await self._async_get_notify_groups()
+        alert_actions = await self._async_get_alert_actions()
 
         # Get current settings for selected device
         current_settings = None
@@ -583,7 +641,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 current_settings = {
                     "alerts_enabled": bool(target.get(CONF_ALERT_GROUP, "")),
                     "alert_group": target.get(CONF_ALERT_GROUP, ""),
-                    "alert_delay": target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+                    "alert_delay": target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
+                    "alert_action_enabled": bool(target.get(CONF_ALERT_ACTION, "")),
+                    "alert_action": target.get(CONF_ALERT_ACTION, ""),
+                    "alert_action_delay": target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
                 }
                 break
 
@@ -591,14 +652,20 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # Update all targets for the selected device
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
+            action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
+            alert_action = user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
             for target in self._targets:
                 if target[CONF_HOST] == self._selected_device:
                     if alert_group:
                         target[CONF_ALERT_GROUP] = alert_group
-                    elif CONF_ALERT_GROUP in target:
-                        # Remove alert group if alerts disabled or none selected
+                    else:
                         target.pop(CONF_ALERT_GROUP, None)
                     target[CONF_ALERT_DELAY] = user_input[CONF_ALERT_DELAY]
+                    if alert_action:
+                        target[CONF_ALERT_ACTION] = alert_action
+                    else:
+                        target.pop(CONF_ALERT_ACTION, None)
+                    target[CONF_ALERT_ACTION_DELAY] = user_input[CONF_ALERT_ACTION_DELAY]
 
             # Update config entry with modified targets
             self.config_data[CONF_TARGETS] = self._targets
@@ -612,7 +679,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         # Create the selection form
         notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
-        # Add an empty option for "No alert group"
         notify_groups_dict[""] = "No alert group"
 
         schema = {
@@ -625,8 +691,19 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Required(CONF_ALERT_DELAY,
                         default=current_settings["alert_delay"] if current_settings else DEFAULT_ALERT_DELAY): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
-            )
+            ),
+            vol.Optional(CONF_ALERT_ACTION_ENABLED,
+                        default=current_settings["alert_action_enabled"] if current_settings else False): bool,
+            vol.Required(CONF_ALERT_ACTION_DELAY,
+                        default=current_settings["alert_action_delay"] if current_settings else DEFAULT_ALERT_ACTION_DELAY): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=120)
+            ),
         }
+        if alert_actions:
+            actions_dict = {"" : "No action"}
+            actions_dict.update(alert_actions)
+            schema[vol.Optional(CONF_ALERT_ACTION,
+                    default=current_settings["alert_action"] if current_settings else "")] = vol.In(actions_dict)
 
         return self.async_show_form(
             step_id="alert_config",
@@ -849,6 +926,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_zha_alert_config(self, user_input=None):
         """Configure alert settings for the selected ZHA device."""
         notify_groups = await self._async_get_notify_groups()
+        alert_actions = await self._async_get_alert_actions()
 
         current_target = next(
             (t for t in self._targets
@@ -858,10 +936,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         current_alert_group = current_target.get(CONF_ALERT_GROUP, "")
         current_alert_delay = current_target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
         current_alerts_enabled = bool(current_alert_group)
+        current_alert_action = current_target.get(CONF_ALERT_ACTION, "")
+        current_action_delay = current_target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+        current_action_enabled = bool(current_alert_action)
 
         if user_input is not None:
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
+            action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
+            alert_action = user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
             for t in self._targets:
                 if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee:
                     if alert_group:
@@ -869,6 +952,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     else:
                         t.pop(CONF_ALERT_GROUP, None)
                     t[CONF_ALERT_DELAY] = user_input[CONF_ALERT_DELAY]
+                    if alert_action:
+                        t[CONF_ALERT_ACTION] = alert_action
+                    else:
+                        t.pop(CONF_ALERT_ACTION, None)
+                    t[CONF_ALERT_ACTION_DELAY] = user_input[CONF_ALERT_ACTION_DELAY]
 
             self.config_data[CONF_TARGETS] = self._targets
             self.hass.config_entries.async_update_entry(
@@ -885,7 +973,15 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             vol.Required(CONF_ALERT_DELAY, default=current_alert_delay): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
             ),
+            vol.Optional(CONF_ALERT_ACTION_ENABLED, default=current_action_enabled): bool,
+            vol.Required(CONF_ALERT_ACTION_DELAY, default=current_action_delay): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=120)
+            ),
         }
+        if alert_actions:
+            actions_dict = {"" : "No action"}
+            actions_dict.update(alert_actions)
+            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = vol.In(actions_dict)
         return self.async_show_form(
             step_id="zha_alert_config",
             data_schema=vol.Schema(schema),

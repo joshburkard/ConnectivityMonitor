@@ -35,6 +35,10 @@ CONF_DNS_SERVER = "dns_server"
 CONF_ALERT_GROUP = "alert_group"
 CONF_ALERT_DELAY = "alert_delay"
 CONF_ALERTS_ENABLED = "alerts_enabled"
+CONF_ALERT_ACTION_ENABLED = "alert_action_enabled"
+CONF_ALERT_ACTION = "alert_action"
+CONF_ALERT_ACTION_DELAY = "alert_action_delay"
+DEFAULT_ALERT_ACTION_DELAY = 30
 
 PROTOCOL_TCP = "TCP"
 PROTOCOL_UDP = "UDP"
