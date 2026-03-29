@@ -24,7 +24,7 @@ from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.update_coordinator import (
     CoordinatorEntity,
     DataUpdateCoordinator,
@@ -619,6 +619,7 @@ class ConnectivitySensor(CoordinatorEntity, SensorEntity):
         self.target = target
         self._attr_has_entity_name = True
         self._attr_available = True
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
         device_name = target.get("device_name", target[CONF_HOST])
         safe_device_name = device_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
@@ -724,6 +725,7 @@ class OverviewSensor(CoordinatorEntity, SensorEntity):
         self._device_coordinators = device_coordinators
         self._attr_has_entity_name = True
         self._attr_available = True
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
         device_name = target.get("device_name", target[CONF_HOST])
         safe_device_name = device_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
@@ -848,6 +850,7 @@ class ADOverviewSensor(CoordinatorEntity, SensorEntity):
         self._coordinators = ad_coordinators
         self._attr_has_entity_name = True
         self._attr_available = True
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
         device_name = target.get("device_name", target[CONF_HOST])
         safe_device_name = device_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
@@ -1001,6 +1004,7 @@ class ZHASensor(CoordinatorEntity, SensorEntity):
         self.target = target
         self._attr_has_entity_name = True
         self._attr_available = True
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
         device_name = target.get("device_name", target[CONF_ZHA_IEEE])
         safe_name = (
@@ -1014,18 +1018,16 @@ class ZHASensor(CoordinatorEntity, SensorEntity):
         self._attr_name = "ZigBee Status"
         self.entity_id = f"sensor.connectivity_monitor_zha_{safe_name}"
 
-        # Use "zha_" prefix on unique_id to avoid any collision with MAC-based network sensors
+        # Unique ID scoped to this integration
         ieee_clean = target[CONF_ZHA_IEEE].replace(":", "").replace("-", "")
         self._attr_unique_id = f"connectivity_zha_{ieee_clean}"
 
-        # Device identifier uses "host" field (= "zha:{ieee}") so the shared
-        # remove-device logic in config_flow can locate it by the same key.
+        # Merge onto the existing ZHA device by using ZHA's own identifier.
+        # This places the sensor alongside the device's entities in HA rather
+        # than creating a separate device, and EntityCategory.DIAGNOSTIC puts
+        # it in a distinct "Diagnostics" card on the device page.
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, target[CONF_HOST])},
-            name=device_name,
-            manufacturer=target.get("manufacturer", "ZigBee"),
-            model=target.get("model", "ZigBee Device"),
-            sw_version=VERSION,
+            identifiers={("zha", target[CONF_ZHA_IEEE])},
         )
 
     @property

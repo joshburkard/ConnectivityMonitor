@@ -790,7 +790,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def async_step_remove_zha_device(self, user_input=None):
         """Remove a monitored ZHA device."""
         entity_registry = async_get_entity_registry(self.hass)
-        device_registry = async_get_device_registry(self.hass)
 
         zha_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
         if not zha_targets:
@@ -798,20 +797,24 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         if user_input is not None:
             ieee = user_input["ieee"]
-            host_key = f"zha:{ieee}"
 
-            # Remove from targets
+            # Remove from targets list
             self._targets = [
                 t for t in self._targets
                 if not (t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == ieee)
             ]
 
-            # Remove device from device registry (entities cleaned up automatically)
-            for device_entry in list(device_registry.devices.values()):
-                for identifier in device_entry.identifiers:
-                    if identifier[0] == DOMAIN and identifier[1] == host_key:
-                        device_registry.async_remove_device(device_entry.id)
-                        break
+            # Only remove our monitoring entity — the ZHA device itself is
+            # owned by the ZHA integration and must NOT be removed.
+            ieee_clean = ieee.replace(":", "").replace("-", "")
+            unique_id = f"connectivity_zha_{ieee_clean}"
+            entry_entities = async_entries_for_config_entry(
+                entity_registry, self.config_entry.entry_id
+            )
+            for entity_entry in entry_entities:
+                if entity_entry.unique_id == unique_id:
+                    entity_registry.async_remove(entity_entry.entity_id)
+                    break
 
             self.config_data[CONF_TARGETS] = self._targets
             self.hass.config_entries.async_update_entry(
