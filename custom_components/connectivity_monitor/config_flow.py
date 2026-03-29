@@ -59,6 +59,11 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     def __init__(self):
         """Initialize the config flow."""
         self._data = {}
+        # ZHA device selection state (reused across main and options flows)
+        self._zha_selected_ieee: str | None = None
+        self._zha_selected_name: str | None = None
+        self._zha_selected_model: str | None = None
+        self._zha_selected_manufacturer: str | None = None
 
     @staticmethod
     @callback
@@ -73,49 +78,63 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return groups
 
     async def async_step_user(self, user_input=None):
-        """Handle a flow initiated by the user."""
-        errors = {}
-
-        # Check if we already have an entry
+        """Handle a flow initiated by the user — choose device type."""
+        # Check if we already have an entry and carry its settings forward
         entries = self._async_current_entries()
         if entries:
-            # Get the first entry and use its configuration
             entry = entries[0]
             existing_data = dict(entry.data)
-            existing_targets = list(existing_data[CONF_TARGETS])
-
-            # Pass the existing configuration to next step
             self._data = {
                 CONF_INTERVAL: existing_data[CONF_INTERVAL],
                 CONF_DNS_SERVER: existing_data[CONF_DNS_SERVER],
-                CONF_TARGETS: existing_targets
+                CONF_TARGETS: list(existing_data[CONF_TARGETS]),
             }
 
         if user_input is not None:
+            if user_input["device_type"] == "zha":
+                return await self.async_step_zha_device()
+            else:
+                return await self.async_step_network()
+
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema({
+                vol.Required("device_type", default="network"): vol.In({
+                    "network": "Network Device (TCP / UDP / ICMP / AD)",
+                    "zha": "ZigBee Device (ZHA)",
+                }),
+            }),
+        )
+
+    async def async_step_network(self, user_input=None):
+        """Configure a network device to monitor."""
+        errors = {}
+        entries = self._async_current_entries()
+
+        if user_input is not None:
             try:
-                # Store the user input, making alert group truly optional
                 self._data.update({
                     CONF_HOST: user_input[CONF_HOST],
                     CONF_PROTOCOL: user_input[CONF_PROTOCOL],
                     "device_name": user_input.get("device_name", ""),
-                    # Only add alert group if alerts are enabled
                     CONF_ALERTS_ENABLED: user_input.get(CONF_ALERTS_ENABLED, False),
-                    CONF_ALERT_GROUP: (user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP) if user_input.get(CONF_ALERTS_ENABLED) else DEFAULT_ALERT_GROUP,
-                    CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+                    CONF_ALERT_GROUP: (
+                        user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
+                    ) if user_input.get(CONF_ALERTS_ENABLED) else DEFAULT_ALERT_GROUP,
+                    CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
                 })
 
                 protocol = self._data[CONF_PROTOCOL]
                 if protocol in [PROTOCOL_TCP, PROTOCOL_UDP]:
                     return await self.async_step_port()
-                elif not entries:  # Only ask for DNS and interval if this is first device
+                elif not entries:
                     return await self.async_step_dns()
                 else:
                     return await self.async_step_finish()
             except Exception as ex:
-                _LOGGER.exception("Error in user step: %s", ex)
+                _LOGGER.exception("Error in network step: %s", ex)
                 errors["base"] = "unknown"
 
-        # Get notification groups for the form
         notify_groups = await self._async_get_notify_groups()
 
         schema = {
@@ -125,25 +144,113 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 PROTOCOL_TCP: "TCP (Custom Port)",
                 PROTOCOL_UDP: "UDP (Custom Port)",
                 PROTOCOL_ICMP: "ICMP (Ping)",
-                PROTOCOL_AD_DC: "Active Directory DC"
+                PROTOCOL_AD_DC: "Active Directory DC",
             }),
             vol.Optional(CONF_ALERTS_ENABLED, default=False): bool,
             vol.Required(CONF_ALERT_DELAY, default=DEFAULT_ALERT_DELAY): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
-            )
+            ),
         }
 
-        # Add alert group selection if we have notify groups
         if notify_groups:
             notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
-            # Add an empty option for "No alert group"
             notify_groups_dict[""] = "No alert group"
             schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
 
         return self.async_show_form(
-            step_id="user",
+            step_id="network",
             data_schema=vol.Schema(schema),
-            errors=errors
+            errors=errors,
+        )
+
+    async def async_step_zha_device(self, user_input=None):
+        """Select a ZHA device to add to monitoring (main config flow)."""
+        from .zha import async_get_zha_devices
+
+        entries = self._async_current_entries()
+        existing_ieees = {
+            t.get(CONF_ZHA_IEEE)
+            for t in self._data.get(CONF_TARGETS, [])
+            if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+        }
+
+        zha_devices = await async_get_zha_devices(self.hass)
+        if not zha_devices:
+            return self.async_show_form(
+                step_id="zha_device",
+                errors={"base": "no_zha_devices"},
+                data_schema=vol.Schema({}),
+            )
+
+        available = [d for d in zha_devices if d["ieee"] not in existing_ieees]
+        if not available:
+            return self.async_show_form(
+                step_id="zha_device",
+                errors={"base": "all_zha_devices_added"},
+                data_schema=vol.Schema({}),
+            )
+
+        if user_input is not None:
+            self._zha_selected_ieee = user_input[CONF_ZHA_IEEE]
+            matched = next(
+                (d for d in zha_devices if d["ieee"] == self._zha_selected_ieee), {}
+            )
+            self._zha_selected_name = matched.get("name") or self._zha_selected_ieee
+            self._zha_selected_model = matched.get("model")
+            self._zha_selected_manufacturer = matched.get("manufacturer")
+            return await self.async_step_zha_configure()
+
+        device_choices = {
+            d["ieee"]: f"{d['name']} ({d['ieee']})"
+            for d in sorted(available, key=lambda x: x["name"].lower())
+        }
+        return self.async_show_form(
+            step_id="zha_device",
+            data_schema=vol.Schema({
+                vol.Required(CONF_ZHA_IEEE): vol.In(device_choices),
+            }),
+        )
+
+    async def async_step_zha_configure(self, user_input=None):
+        """Set device name and inactivity timeout for the selected ZHA device."""
+        entries = self._async_current_entries()
+
+        if user_input is not None:
+            device_name = (user_input.get("device_name") or "").strip() or self._zha_selected_name
+            new_target = {
+                CONF_PROTOCOL: PROTOCOL_ZHA,
+                CONF_HOST: f"zha:{self._zha_selected_ieee}",
+                CONF_ZHA_IEEE: self._zha_selected_ieee,
+                "device_name": device_name,
+                CONF_INACTIVE_TIMEOUT: user_input[CONF_INACTIVE_TIMEOUT],
+            }
+            if self._zha_selected_model:
+                new_target["model"] = self._zha_selected_model
+            if self._zha_selected_manufacturer:
+                new_target["manufacturer"] = self._zha_selected_manufacturer
+
+            targets = list(self._data.get(CONF_TARGETS, []))
+            targets.append(new_target)
+            self._data[CONF_TARGETS] = targets
+            self._data[CONF_PROTOCOL] = PROTOCOL_ZHA  # signal finish() to skip port/DNS
+
+            if not entries:
+                # First-ever entry: still need DNS + interval
+                return await self.async_step_dns()
+            return await self.async_step_finish()
+
+        return self.async_show_form(
+            step_id="zha_configure",
+            data_schema=vol.Schema({
+                vol.Optional("device_name", default=self._zha_selected_name or ""): str,
+                vol.Required(CONF_INACTIVE_TIMEOUT, default=DEFAULT_INACTIVE_TIMEOUT): vol.All(
+                    vol.Coerce(int), vol.Range(min=5, max=1440)
+                ),
+            }),
+            description_placeholders={
+                "device_name": self._zha_selected_name or "",
+                "ieee": self._zha_selected_ieee or "",
+            },
         )
 
     async def async_step_dns(self, user_input=None):
@@ -202,56 +309,57 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_finish(self, user_input=None):
         """Create or update the config entry."""
-        device_name = self._data.get("device_name", "").strip() or self._data[CONF_HOST]
-
-        # First, get a copy of the existing targets if any
         entries = self._async_current_entries()
-        if entries:
-            entry = entries[0]
-            existing_data = dict(entry.data)
-            targets = list(existing_data[CONF_TARGETS])
-        else:
-            targets = []
 
-        # Create new target with alert settings
-        base_target = {
-            CONF_HOST: self._data[CONF_HOST],
-            CONF_PROTOCOL: self._data[CONF_PROTOCOL],
-            "device_name": device_name,
-            CONF_ALERT_GROUP: self._data.get(CONF_ALERT_GROUP, DEFAULT_ALERT_GROUP),
-            CONF_ALERT_DELAY: self._data.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
-        }
+        # For ZHA targets the target was already appended to self._data[CONF_TARGETS]
+        # in async_step_zha_configure; nothing else to add here.
+        if self._data.get(CONF_PROTOCOL) != PROTOCOL_ZHA:
+            device_name = self._data.get("device_name", "").strip() or self._data[CONF_HOST]
 
-        # Handle AD_DC protocol
-        if self._data[CONF_PROTOCOL] == PROTOCOL_AD_DC:
-            for port in AD_DC_PORTS:
-                target = base_target.copy()
-                target[CONF_PROTOCOL] = PROTOCOL_TCP
-                target[CONF_PORT] = port
-                targets.append(target)
+            if entries:
+                entry = entries[0]
+                existing_data = dict(entry.data)
+                targets = list(existing_data[CONF_TARGETS])
+            else:
+                targets = []
+
+            base_target = {
+                CONF_HOST: self._data[CONF_HOST],
+                CONF_PROTOCOL: self._data[CONF_PROTOCOL],
+                "device_name": device_name,
+                CONF_ALERT_GROUP: self._data.get(CONF_ALERT_GROUP, DEFAULT_ALERT_GROUP),
+                CONF_ALERT_DELAY: self._data.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
+            }
+
+            if self._data[CONF_PROTOCOL] == PROTOCOL_AD_DC:
+                for port in AD_DC_PORTS:
+                    target = base_target.copy()
+                    target[CONF_PROTOCOL] = PROTOCOL_TCP
+                    target[CONF_PORT] = port
+                    targets.append(target)
+            else:
+                if self._data[CONF_PROTOCOL] in [PROTOCOL_TCP, PROTOCOL_UDP]:
+                    base_target[CONF_PORT] = self._data[CONF_PORT]
+                targets.append(base_target)
         else:
-            # Add port for TCP/UDP
-            if self._data[CONF_PROTOCOL] in [PROTOCOL_TCP, PROTOCOL_UDP]:
-                base_target[CONF_PORT] = self._data[CONF_PORT]
-            targets.append(base_target)
+            # ZHA path: targets list was already updated in zha_configure
+            targets = list(self._data.get(CONF_TARGETS, []))
 
         data = {
             CONF_TARGETS: targets,
             CONF_INTERVAL: self._data.get(CONF_INTERVAL, DEFAULT_INTERVAL),
-            CONF_DNS_SERVER: self._data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER)
+            CONF_DNS_SERVER: self._data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER),
         }
 
-        # If we have an existing entry, update it
         if entries:
             entry = entries[0]
             self.hass.config_entries.async_update_entry(entry, data=data)
             await self.hass.config_entries.async_reload(entry.entry_id)
             return self.async_abort(reason="device_added")
 
-        # Otherwise create new entry
         return self.async_create_entry(
             title="Connectivity Monitor",
-            data=data
+            data=data,
         )
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
@@ -293,8 +401,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_remove_sensor()
             elif user_input["next_step"] == "settings":
                 return await self.async_step_settings()
-            elif user_input["next_step"] == "add_zha_device":
-                return await self.async_step_zha_device()
             elif user_input["next_step"] == "remove_zha_device":
                 return await self.async_step_remove_zha_device()
             elif user_input["next_step"] == "zha_timeout":
@@ -309,7 +415,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     "remove_device": "Remove Device",
                     "remove_sensor": "Remove Single Sensor",
                     "settings": "Change Settings",
-                    "add_zha_device": "Add ZigBee Device (ZHA)",
                     "remove_zha_device": "Remove ZigBee Device (ZHA)",
                     "zha_timeout": "Change ZigBee Inactivity Timeout",
                 })
@@ -699,92 +804,6 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="modify_alerts",
             data_schema=vol.Schema(schema)
-        )
-
-    async def async_step_zha_device(self, user_input=None):
-        """Select a ZHA device to add to monitoring."""
-        from .zha import async_get_zha_devices
-
-        zha_devices = await async_get_zha_devices(self.hass)
-        if not zha_devices:
-            return self.async_show_form(
-                step_id="zha_device",
-                errors={"base": "no_zha_devices"},
-                data_schema=vol.Schema({}),
-            )
-
-        # Filter out already-monitored ZHA devices
-        existing_ieees = {
-            t.get(CONF_ZHA_IEEE)
-            for t in self._targets
-            if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-        }
-        available = [d for d in zha_devices if d["ieee"] not in existing_ieees]
-
-        if not available:
-            return self.async_show_form(
-                step_id="zha_device",
-                errors={"base": "all_zha_devices_added"},
-                data_schema=vol.Schema({}),
-            )
-
-        if user_input is not None:
-            self._zha_selected_ieee = user_input[CONF_ZHA_IEEE]
-            matched = next(
-                (d for d in zha_devices if d["ieee"] == self._zha_selected_ieee), {}
-            )
-            self._zha_selected_name = matched.get("name") or self._zha_selected_ieee
-            self._zha_selected_model = matched.get("model")
-            self._zha_selected_manufacturer = matched.get("manufacturer")
-            return await self.async_step_zha_configure()
-
-        device_choices = {
-            d["ieee"]: f"{d['name']} ({d['ieee']})"
-            for d in sorted(available, key=lambda x: x["name"].lower())
-        }
-        return self.async_show_form(
-            step_id="zha_device",
-            data_schema=vol.Schema({
-                vol.Required(CONF_ZHA_IEEE): vol.In(device_choices),
-            }),
-        )
-
-    async def async_step_zha_configure(self, user_input=None):
-        """Configure device name and inactivity timeout for the selected ZHA device."""
-        if user_input is not None:
-            device_name = (user_input.get("device_name") or "").strip() or self._zha_selected_name
-            new_target = {
-                CONF_PROTOCOL: PROTOCOL_ZHA,
-                CONF_HOST: f"zha:{self._zha_selected_ieee}",
-                CONF_ZHA_IEEE: self._zha_selected_ieee,
-                "device_name": device_name,
-                CONF_INACTIVE_TIMEOUT: user_input[CONF_INACTIVE_TIMEOUT],
-            }
-            if self._zha_selected_model:
-                new_target["model"] = self._zha_selected_model
-            if self._zha_selected_manufacturer:
-                new_target["manufacturer"] = self._zha_selected_manufacturer
-
-            self._targets.append(new_target)
-            self.config_data[CONF_TARGETS] = self._targets
-            self.hass.config_entries.async_update_entry(
-                self.config_entry, data=self.config_data
-            )
-            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
-            return self.async_create_entry(title="", data={})
-
-        return self.async_show_form(
-            step_id="zha_configure",
-            data_schema=vol.Schema({
-                vol.Optional("device_name", default=self._zha_selected_name or ""): str,
-                vol.Required(CONF_INACTIVE_TIMEOUT, default=DEFAULT_INACTIVE_TIMEOUT): vol.All(
-                    vol.Coerce(int), vol.Range(min=5, max=1440)
-                ),
-            }),
-            description_placeholders={
-                "device_name": self._zha_selected_name or "",
-                "ieee": self._zha_selected_ieee or "",
-            },
         )
 
     async def async_step_remove_zha_device(self, user_input=None):

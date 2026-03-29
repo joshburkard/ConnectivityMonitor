@@ -32,8 +32,15 @@
                 }
             },
             "user": {
-                "title": "Add New Device",
-                "description": "Configure a new device to monitor",
+                "title": "Add Device",
+                "description": "Choose the type of device to add",
+                "data": {
+                    "device_type": "Device Type"
+                }
+            },
+            "network": {
+                "title": "Add Network Device",
+                "description": "Configure a network device to monitor",
                 "data": {
                     "host": "Host (IP or FQDN)",
                     "device_name": "Device Name (optional)",
@@ -42,11 +49,28 @@
                     "alert_group": "Alert Group (optional)",
                     "alert_delay": "Alert Delay in minutes (optional)"
                 }
+            },
+            "zha_device": {
+                "title": "Add ZigBee Device (ZHA)",
+                "description": "Select a ZigBee device discovered by ZHA to monitor",
+                "data": {
+                    "ieee": "ZigBee Device"
+                }
+            },
+            "zha_configure": {
+                "title": "Configure ZigBee Device",
+                "description": "Set a friendly name and inactivity timeout for **{device_name}** ({ieee})",
+                "data": {
+                    "device_name": "Device Name (optional)",
+                    "inactive_timeout": "Inactivity Timeout (minutes)"
+                }
             }
         },
         "error": {
             "unknown": "Unexpected error occurred. Please check Home Assistant logs.",
-            "invalid_dns_server": "Invalid DNS server IP address"
+            "invalid_dns_server": "Invalid DNS server IP address",
+            "no_zha_devices": "No ZigBee devices found. Make sure ZHA is configured and has discovered devices.",
+            "all_zha_devices_added": "All discovered ZigBee devices are already being monitored."
         },
         "abort": {
             "device_added": "Device has been added successfully",
@@ -111,21 +135,6 @@
                 "data": {
                     "interval": "Update interval (seconds)",
                     "dns_server": "DNS Server"
-                }
-            },
-            "zha_device": {
-                "title": "Add ZigBee Device (ZHA)",
-                "description": "Select a ZigBee device discovered by ZHA to monitor",
-                "data": {
-                    "ieee": "ZigBee Device"
-                }
-            },
-            "zha_configure": {
-                "title": "Configure ZigBee Device",
-                "description": "Set a friendly name and inactivity timeout for **{device_name}** ({ieee})",
-                "data": {
-                    "device_name": "Device Name (optional)",
-                    "inactive_timeout": "Inactivity Timeout (minutes)"
                 }
             },
             "remove_zha_device": {
