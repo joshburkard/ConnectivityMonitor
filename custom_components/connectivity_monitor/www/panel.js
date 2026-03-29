@@ -7,6 +7,7 @@
       (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
     );
 
+  // ── Network tab constants ────────────────────────────────────────────────────
   const STATUS_ORDER = {
     Disconnected: 0,
     "Not Connected": 1,
@@ -22,17 +23,36 @@
     Unknown:               { label: "Unknown",             css: "unknown", icon: "?" },
   };
 
+  // ── ZigBee tab constants ─────────────────────────────────────────────────────
+  const ZHA_STATUS_ORDER = { Inactive: 0, Unknown: 1, Active: 2 };
+
+  const ZHA_STATUS_META = {
+    Active:   { label: "Active",   css: "ok",      icon: "\u2713" },
+    Inactive: { label: "Inactive", css: "error",   icon: "\u2717" },
+    Unknown:  { label: "Unknown",  css: "unknown", icon: "?" },
+  };
+
+  // ── Panel component ──────────────────────────────────────────────────────────
   class ConnectivityMonitorPanel extends HTMLElement {
     constructor() {
       super();
       this.attachShadow({ mode: "open" });
       this._hass = null;
       this._lastFingerprint = null;
+      this._activeTab = "network";
       // Tracks which device entity-ids are manually collapsed/expanded.
       // null = not yet initialised (use default based on status).
       this._collapsed = null;
 
       this.shadowRoot.addEventListener("click", (e) => {
+        // Tab button → switch active tab
+        const tabBtn = e.target.closest(".tab-btn[data-tab]");
+        if (tabBtn) {
+          e.stopPropagation();
+          this._activeTab = tabBtn.dataset.tab;
+          this._render();
+          return;
+        }
         // Configure button → navigate to integration page
         const configBtn = e.target.closest("[data-action='configure']");
         if (configBtn) {
@@ -58,7 +78,7 @@
           window.dispatchEvent(new CustomEvent("location-changed"));
           return;
         }
-        // Sensor row click → open more-info dialog
+        // Sensor row / entity click → open more-info dialog
         const entityEl = e.target.closest("[data-entity]");
         if (entityEl) {
           e.stopPropagation();
@@ -87,6 +107,7 @@
 
     connectedCallback() { this._render(); }
 
+    // ── Network data ───────────────────────────────────────────────────────────
     _getDeviceData() {
       if (!this._hass) return { groups: [], totalDevices: 0 };
       const states = this._hass.states;
@@ -94,6 +115,7 @@
 
       for (const [entityId, state] of Object.entries(states)) {
         if (!entityId.startsWith("sensor.connectivity_monitor_") || !entityId.endsWith("_overall")) continue;
+        if (state.attributes.monitor_type === "zha") continue;
 
         const host            = state.attributes.host || "";
         const deviceName      = state.attributes.device_name || host;
@@ -104,7 +126,8 @@
           const id = s.entity_id;
           return id.startsWith("sensor.connectivity_monitor_") &&
             !id.endsWith("_overall") && !id.endsWith("_ad") &&
-            s.attributes.host === host;
+            s.attributes.host === host &&
+            s.attributes.monitor_type !== "zha";
         });
 
         sensors.sort((a, b) => {
@@ -132,14 +155,57 @@
       return { groups, totalDevices: devices.length };
     }
 
-    _initCollapsed(groups) {
-      // First render only: collapse healthy devices, expand problem devices
+    // ── ZigBee (ZHA) data ──────────────────────────────────────────────────────
+    _getZhaData() {
+      if (!this._hass) return { groups: [], totalDevices: 0 };
+      const states = this._hass.states;
+      const devices = [];
+
+      for (const [entityId, state] of Object.entries(states)) {
+        if (!entityId.startsWith("sensor.connectivity_monitor_")) continue;
+        if (state.attributes.monitor_type !== "zha") continue;
+
+        const ieee       = state.attributes.ieee || "";
+        const deviceName = state.attributes.device_name || ieee;
+        const status     = state.state || "Unknown";
+        const lastSeen   = state.attributes.last_seen || null;
+        const minutesAgo = state.attributes.minutes_ago != null ? state.attributes.minutes_ago : null;
+        const timeout    = state.attributes.timeout_minutes;
+
+        devices.push({ entityId, ieee, deviceName, status, lastSeen, minutesAgo, timeout });
+      }
+
+      const groupMap = {};
+      for (const device of devices) {
+        if (!groupMap[device.status]) groupMap[device.status] = [];
+        groupMap[device.status].push(device);
+      }
+
+      const groups = Object.entries(groupMap)
+        .sort(([a], [b]) => (ZHA_STATUS_ORDER[a] ?? 99) - (ZHA_STATUS_ORDER[b] ?? 99))
+        .map(([status, devs]) => ({
+          status,
+          devices: devs.sort((a, b) => a.deviceName.localeCompare(b.deviceName)),
+        }));
+
+      return { groups, totalDevices: devices.length };
+    }
+
+    // ── Collapse management ────────────────────────────────────────────────────
+    _initCollapsed(networkGroups, zhaGroups) {
       if (this._collapsed !== null) return;
       this._collapsed = new Set();
-      for (const group of groups) {
+      for (const group of networkGroups) {
         if (group.status === "Connected") {
           for (const device of group.devices) {
             this._collapsed.add(device.overallEntityId);
+          }
+        }
+      }
+      for (const group of zhaGroups) {
+        if (group.status === "Active") {
+          for (const device of group.devices) {
+            this._collapsed.add(device.entityId);
           }
         }
       }
@@ -158,6 +224,7 @@
       });
     }
 
+    // ── Network tab renderers ──────────────────────────────────────────────────
     _renderSensor(sensor) {
       const st      = sensor.state;
       const isError = st === "Disconnected" || st === "Not Connected";
@@ -203,7 +270,7 @@
         }
       }
 
-      const chevron  = this._collapsed.has(device.overallEntityId) ? "\u25b6" : "\u25bc";
+      const chevron      = this._collapsed.has(device.overallEntityId) ? "\u25b6" : "\u25bc";
       const chevronTitle = this._collapsed.has(device.overallEntityId) ? "Expand" : "Collapse";
 
       return "<div class=\"device-card card-" + meta.css + "\">" +
@@ -232,15 +299,102 @@
         "</div>";
     }
 
+    // ── ZigBee tab renderers ───────────────────────────────────────────────────
+    _renderZhaDevice(device) {
+      const meta      = ZHA_STATUS_META[device.status] || ZHA_STATUS_META.Unknown;
+      const toggle    = device.entityId;
+      const collapsed = this._collapsed.has(toggle);
+      const chevron   = collapsed ? "\u25b6" : "\u25bc";
+
+      let lastSeenLabel = "Never seen";
+      if (device.minutesAgo != null) {
+        if (device.minutesAgo < 60) {
+          lastSeenLabel = esc(device.minutesAgo) + " min ago";
+        } else if (device.minutesAgo < 1440) {
+          lastSeenLabel = Math.round(device.minutesAgo / 60) + " hr ago";
+        } else {
+          lastSeenLabel = Math.round(device.minutesAgo / 1440) + " day(s) ago";
+        }
+      }
+
+      let deviceAttr = "data-entity=\"" + esc(device.entityId) + "\"";
+      if (this._hass && this._hass.entities) {
+        const entry = this._hass.entities[device.entityId];
+        if (entry && entry.device_id) {
+          deviceAttr = "data-device=\"" + esc(entry.device_id) + "\"";
+        }
+      }
+
+      const badgeCss   = meta.css === "ok" ? "badge-ok" : "badge-error";
+      const timeoutHtml = device.timeout != null
+        ? "<span class=\"sensor-latency\">timeout: " + esc(device.timeout) + " min</span>"
+        : "";
+
+      return "<div class=\"device-card card-" + meta.css + "\">" +
+        "<div class=\"device-header\">" +
+          "<button class=\"toggle-btn\" data-toggle=\"" + esc(toggle) + "\" title=\"" + (collapsed ? "Expand" : "Collapse") + "\">" + chevron + "</button>" +
+          "<div class=\"device-info clickable\" " + deviceAttr + ">" +
+            "<div class=\"device-name\">" + esc(device.deviceName) + "</div>" +
+            "<div class=\"device-host\">" + esc(device.ieee) + "</div>" +
+          "</div>" +
+          "<span class=\"device-badge " + badgeCss + "\">" + esc(device.status) + "</span>" +
+        "</div>" +
+        "<div class=\"sensor-list\">" +
+          "<div class=\"sensor-row clickable\" data-entity=\"" + esc(device.entityId) + "\">" +
+            "<span class=\"sensor-dot dot-" + meta.css + "\"></span>" +
+            "<span class=\"sensor-proto\">Last seen: " + esc(lastSeenLabel) + "</span>" +
+            "<span class=\"sensor-state label-" + meta.css + "\">" + esc(device.status) + "</span>" +
+            timeoutHtml +
+            "<span class=\"row-arrow\">\u203a</span>" +
+          "</div>" +
+        "</div>" +
+        "</div>";
+    }
+
+    _renderZhaGroup(group) {
+      const meta    = ZHA_STATUS_META[group.status] || ZHA_STATUS_META.Unknown;
+      const devHtml = group.devices.map((d) => this._renderZhaDevice(d)).join("");
+      return "<div class=\"group\">" +
+        "<div class=\"group-header group-header-" + meta.css + "\">" +
+          "<span class=\"group-icon\">" + meta.icon + "</span>" +
+          "<span class=\"group-label\">" + esc(meta.label) + "</span>" +
+          "<span class=\"group-count\">" + esc(group.devices.length) + "</span>" +
+        "</div>" +
+        devHtml +
+        "</div>";
+    }
+
+    // ── Main render ────────────────────────────────────────────────────────────
     _render() {
       if (!this.shadowRoot) return;
       try {
-        const { groups, totalDevices } = this._getDeviceData();
-        this._initCollapsed(groups);
+        const { groups: networkGroups, totalDevices: totalNetwork } = this._getDeviceData();
+        const { groups: zhaGroups,     totalDevices: totalZha     } = this._getZhaData();
+        const totalDevices = totalNetwork + totalZha;
 
-        const bodyHtml = totalDevices === 0
-          ? "<div class=\"no-devices\">No devices are being monitored yet.</div>"
-          : groups.map((g) => this._renderGroup(g)).join("");
+        this._initCollapsed(networkGroups, zhaGroups);
+
+        const networkActive = this._activeTab === "network";
+        const tabBarHtml =
+          "<div class=\"tab-bar\">" +
+            "<button class=\"tab-btn" + (networkActive ? " tab-active" : "") + "\" data-tab=\"network\">" +
+              "Network" + (totalNetwork > 0 ? " (" + esc(totalNetwork) + ")" : "") +
+            "</button>" +
+            "<button class=\"tab-btn" + (!networkActive ? " tab-active" : "") + "\" data-tab=\"zha\">" +
+              "\u26a1 ZigBee" + (totalZha > 0 ? " (" + esc(totalZha) + ")" : "") +
+            "</button>" +
+          "</div>";
+
+        let tabContentHtml;
+        if (networkActive) {
+          tabContentHtml = totalNetwork === 0
+            ? "<div class=\"no-devices\">No network devices are being monitored yet.<br>Use <em>Configure</em> to add a device.</div>"
+            : networkGroups.map((g) => this._renderGroup(g)).join("");
+        } else {
+          tabContentHtml = totalZha === 0
+            ? "<div class=\"no-devices\">No ZigBee devices are being monitored yet.<br>Use <em>Configure \u2192 Add ZigBee Device (ZHA)</em> to get started.</div>"
+            : zhaGroups.map((g) => this._renderZhaGroup(g)).join("");
+        }
 
         const container = this.shadowRoot.querySelector("#cm-root");
         const root = container || document.createElement("div");
@@ -249,11 +403,15 @@
           "<style>" +
           "*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }" +
           ":host { display: block; padding: 16px; background: var(--primary-background-color); min-height: 100%; font-family: var(--paper-font-body1_-_font-family, Roboto, sans-serif); color: var(--primary-text-color); }" +
-          ".page-header { display: flex; align-items: flex-start; justify-content: space-between; padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.12)); }" +
+          ".page-header { display: flex; align-items: flex-start; justify-content: space-between; padding-bottom: 12px; margin-bottom: 0; border-bottom: 1px solid var(--divider-color, rgba(0,0,0,.12)); }" +
           ".page-title { font-size: 1.5rem; font-weight: 400; }" +
           ".page-subtitle { font-size: 0.85rem; color: var(--secondary-text-color); margin-top: 4px; }" +
           ".configure-btn { display: flex; align-items: center; gap: 6px; background: none; border: 1px solid var(--divider-color, rgba(0,0,0,.2)); border-radius: 6px; padding: 6px 12px; cursor: pointer; color: var(--primary-text-color); font-size: 0.82rem; white-space: nowrap; flex-shrink: 0; margin-top: 2px; }" +
           ".configure-btn:hover { background: var(--secondary-background-color, rgba(0,0,0,.05)); }" +
+          ".tab-bar { display: flex; gap: 0; margin-top: 12px; margin-bottom: 16px; border-bottom: 2px solid var(--divider-color, rgba(0,0,0,.12)); }" +
+          ".tab-btn { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -2px; padding: 10px 18px; cursor: pointer; font-size: 0.88rem; font-weight: 500; color: var(--secondary-text-color); transition: color .15s; }" +
+          ".tab-btn:hover { color: var(--primary-text-color); }" +
+          ".tab-btn.tab-active { color: var(--primary-color, #03a9f4); border-bottom-color: var(--primary-color, #03a9f4); }" +
           ".group { margin-bottom: 20px; }" +
           ".group-header { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-radius: 6px 6px 0 0; font-size: 0.82rem; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; }" +
           ".group-header-error   { background: rgba(244,67,54,.15);   color: var(--error-color,   #f44336); }" +
@@ -285,16 +443,18 @@
           ".dot-error   { background: var(--error-color,   #f44336); }" +
           ".dot-warning { background: var(--warning-color, #ff9800); }" +
           ".dot-ok      { background: var(--success-color, #4caf50); }" +
+          ".dot-unknown { background: var(--secondary-text-color); }" +
           ".sensor-proto { font-size: 0.85rem; font-weight: 500; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }" +
           ".sensor-state { font-size: 0.8rem; white-space: nowrap; flex-shrink: 0; }" +
           ".label-error   { color: var(--error-color,   #f44336); }" +
           ".label-warning { color: var(--warning-color, #ff9800); }" +
           ".label-ok      { color: var(--success-color, #4caf50); }" +
+          ".label-unknown { color: var(--secondary-text-color); }" +
           ".sensor-latency { font-size: 0.75rem; color: var(--secondary-text-color); white-space: nowrap; flex-shrink: 0; }" +
           ".clickable { cursor: pointer; }" +
           ".sensor-row.clickable:hover { background: var(--secondary-background-color, rgba(0,0,0,.05)); }" +
           ".row-arrow { font-size: 1rem; color: var(--secondary-text-color); flex-shrink: 0; margin-left: auto; padding-left: 4px; }" +
-          ".no-devices { padding: 40px 20px; text-align: center; color: var(--secondary-text-color); font-size: 0.95rem; }" +
+          ".no-devices { padding: 40px 20px; text-align: center; color: var(--secondary-text-color); font-size: 0.95rem; line-height: 1.6; }" +
           ".error-msg { padding: 20px; color: var(--error-color, #f44336); font-size: 0.85rem; white-space: pre-wrap; }" +
           "</style>" +
           "<div class=\"page-header\">" +
@@ -304,11 +464,11 @@
             "</div>" +
             "<button class=\"configure-btn\" data-action=\"configure\">&#9881;&nbsp;Configure</button>" +
           "</div>" +
-          bodyHtml;
+          tabBarHtml +
+          "<div class=\"tab-content\">" + tabContentHtml + "</div>";
 
         if (!container) this.shadowRoot.appendChild(root);
 
-        // Apply collapse state after DOM is updated
         this._applyCollapse();
       } catch (err) {
         this.shadowRoot.innerHTML = "<div class=\"error-msg\">Panel error: " + esc(String(err)) + "</div>";

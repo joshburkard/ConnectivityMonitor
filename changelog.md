@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00030 | 28/03/2026 | added support for monitoring ZigBee (ZHA) devices |
 | 0.1.00029 | 27/03/2026 | add labeled 'Enable Alerts' checkbox to new device and alert config flows |
 | 0.1.00028 | 27/03/2026 | add 'Configure' button in sidebar panel |
 | 0.1.00027 | 27/03/2026 | fix issue with wrong Overall sensor value |

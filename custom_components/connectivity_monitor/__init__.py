@@ -46,7 +46,7 @@ async def _async_register_panel(hass: HomeAssistant) -> None:
     await async_register_panel(
         hass,
         webcomponent_name="connectivity-monitor-panel",
-        frontend_url_path="connectivity_monitor_issues",
+        frontend_url_path="connectivity_monitor",
         module_url=f"/connectivity_monitor_panel/panel.js?v={datetime.now().strftime('%Y%m%d%H%M%S')}",
         sidebar_title="Connectivity Monitor",
         sidebar_icon="mdi:lan-check",

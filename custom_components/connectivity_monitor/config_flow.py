@@ -36,6 +36,10 @@ from .const import (
     PROTOCOL_AD_DC,
     PROTOCOL_TCP,
     PROTOCOL_UDP,
+    PROTOCOL_ZHA,
+    CONF_ZHA_IEEE,
+    CONF_INACTIVE_TIMEOUT,
+    DEFAULT_INACTIVE_TIMEOUT,
     AD_DC_PORTS
 )
 
@@ -258,6 +262,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self.config_data = {}
         self._targets = []
         self._selected_device = None
+        # ZHA device selection state
+        self._zha_selected_ieee: str | None = None
+        self._zha_selected_name: str | None = None
+        self._zha_selected_model: str | None = None
+        self._zha_selected_manufacturer: str | None = None
 
     async def _async_get_notify_groups(self):
         """Get list of notification groups from Home Assistant."""
@@ -284,6 +293,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_remove_sensor()
             elif user_input["next_step"] == "settings":
                 return await self.async_step_settings()
+            elif user_input["next_step"] == "add_zha_device":
+                return await self.async_step_zha_device()
+            elif user_input["next_step"] == "remove_zha_device":
+                return await self.async_step_remove_zha_device()
+            elif user_input["next_step"] == "zha_timeout":
+                return await self.async_step_zha_select_for_timeout()
 
         return self.async_show_form(
             step_id="menu",
@@ -293,15 +308,20 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     "rename_device": "Change Host / Device Name",
                     "remove_device": "Remove Device",
                     "remove_sensor": "Remove Single Sensor",
-                    "settings": "Change Settings"
+                    "settings": "Change Settings",
+                    "add_zha_device": "Add ZigBee Device (ZHA)",
+                    "remove_zha_device": "Remove ZigBee Device (ZHA)",
+                    "zha_timeout": "Change ZigBee Inactivity Timeout",
                 })
             })
         )
 
     async def async_step_rename_device_select(self, user_input=None):
-        """Select which device to rename."""
+        """Select which device to rename (network devices only)."""
         devices = {}
         for target in self._targets:
+            if target.get(CONF_PROTOCOL) == PROTOCOL_ZHA:
+                continue  # ZHA devices don't support host renaming
             device_host = target[CONF_HOST]
             if device_host not in devices:
                 device_name = target.get("device_name", device_host)
@@ -397,10 +417,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         )
 
     async def async_step_device_select(self, user_input=None):
-        """First step of alert modification - device selection."""
-        # Get unique devices
+        """First step of alert modification - device selection (network only)."""
+        # Get unique devices (skip ZHA targets — they don't use notify groups)
         devices = {}
         for target in self._targets:
+            if target.get(CONF_PROTOCOL) == PROTOCOL_ZHA:
+                continue
             device_host = target[CONF_HOST]
             if device_host not in devices:
                 device_name = target.get("device_name", device_host)
@@ -581,9 +603,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             await self.hass.config_entries.async_reload(self.config_entry.entry_id)
             return self.async_create_entry(title="", data={})
 
-        # Create list of sensors with readable names
+        # Create list of sensors with readable names (network sensors only)
         sensors = {}
         for target in self._targets:
+            if target.get(CONF_PROTOCOL) == PROTOCOL_ZHA:
+                continue  # ZHA devices are removed via remove_zha_device
             device_name = target.get("device_name", target[CONF_HOST])
             if target[CONF_PROTOCOL] in [PROTOCOL_TCP, PROTOCOL_UDP]:
                 sensor_name = f"{device_name} - {target[CONF_PROTOCOL]} {target[CONF_PORT]}"
@@ -675,6 +699,186 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="modify_alerts",
             data_schema=vol.Schema(schema)
+        )
+
+    async def async_step_zha_device(self, user_input=None):
+        """Select a ZHA device to add to monitoring."""
+        from .zha import async_get_zha_devices
+
+        zha_devices = await async_get_zha_devices(self.hass)
+        if not zha_devices:
+            return self.async_show_form(
+                step_id="zha_device",
+                errors={"base": "no_zha_devices"},
+                data_schema=vol.Schema({}),
+            )
+
+        # Filter out already-monitored ZHA devices
+        existing_ieees = {
+            t.get(CONF_ZHA_IEEE)
+            for t in self._targets
+            if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+        }
+        available = [d for d in zha_devices if d["ieee"] not in existing_ieees]
+
+        if not available:
+            return self.async_show_form(
+                step_id="zha_device",
+                errors={"base": "all_zha_devices_added"},
+                data_schema=vol.Schema({}),
+            )
+
+        if user_input is not None:
+            self._zha_selected_ieee = user_input[CONF_ZHA_IEEE]
+            matched = next(
+                (d for d in zha_devices if d["ieee"] == self._zha_selected_ieee), {}
+            )
+            self._zha_selected_name = matched.get("name") or self._zha_selected_ieee
+            self._zha_selected_model = matched.get("model")
+            self._zha_selected_manufacturer = matched.get("manufacturer")
+            return await self.async_step_zha_configure()
+
+        device_choices = {
+            d["ieee"]: f"{d['name']} ({d['ieee']})"
+            for d in sorted(available, key=lambda x: x["name"].lower())
+        }
+        return self.async_show_form(
+            step_id="zha_device",
+            data_schema=vol.Schema({
+                vol.Required(CONF_ZHA_IEEE): vol.In(device_choices),
+            }),
+        )
+
+    async def async_step_zha_configure(self, user_input=None):
+        """Configure device name and inactivity timeout for the selected ZHA device."""
+        if user_input is not None:
+            device_name = (user_input.get("device_name") or "").strip() or self._zha_selected_name
+            new_target = {
+                CONF_PROTOCOL: PROTOCOL_ZHA,
+                CONF_HOST: f"zha:{self._zha_selected_ieee}",
+                CONF_ZHA_IEEE: self._zha_selected_ieee,
+                "device_name": device_name,
+                CONF_INACTIVE_TIMEOUT: user_input[CONF_INACTIVE_TIMEOUT],
+            }
+            if self._zha_selected_model:
+                new_target["model"] = self._zha_selected_model
+            if self._zha_selected_manufacturer:
+                new_target["manufacturer"] = self._zha_selected_manufacturer
+
+            self._targets.append(new_target)
+            self.config_data[CONF_TARGETS] = self._targets
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=self.config_data
+            )
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="zha_configure",
+            data_schema=vol.Schema({
+                vol.Optional("device_name", default=self._zha_selected_name or ""): str,
+                vol.Required(CONF_INACTIVE_TIMEOUT, default=DEFAULT_INACTIVE_TIMEOUT): vol.All(
+                    vol.Coerce(int), vol.Range(min=5, max=1440)
+                ),
+            }),
+            description_placeholders={
+                "device_name": self._zha_selected_name or "",
+                "ieee": self._zha_selected_ieee or "",
+            },
+        )
+
+    async def async_step_remove_zha_device(self, user_input=None):
+        """Remove a monitored ZHA device."""
+        entity_registry = async_get_entity_registry(self.hass)
+        device_registry = async_get_device_registry(self.hass)
+
+        zha_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
+        if not zha_targets:
+            return await self.async_step_menu()
+
+        if user_input is not None:
+            ieee = user_input["ieee"]
+            host_key = f"zha:{ieee}"
+
+            # Remove from targets
+            self._targets = [
+                t for t in self._targets
+                if not (t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == ieee)
+            ]
+
+            # Remove device from device registry (entities cleaned up automatically)
+            for device_entry in list(device_registry.devices.values()):
+                for identifier in device_entry.identifiers:
+                    if identifier[0] == DOMAIN and identifier[1] == host_key:
+                        device_registry.async_remove_device(device_entry.id)
+                        break
+
+            self.config_data[CONF_TARGETS] = self._targets
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=self.config_data
+            )
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            return self.async_create_entry(title="", data={})
+
+        devices = {
+            t[CONF_ZHA_IEEE]: f"{t.get('device_name', t[CONF_ZHA_IEEE])} ({t[CONF_ZHA_IEEE]})"
+            for t in sorted(zha_targets, key=lambda x: x.get("device_name", ""))
+        }
+        return self.async_show_form(
+            step_id="remove_zha_device",
+            data_schema=vol.Schema({
+                vol.Required("ieee"): vol.In(devices),
+            }),
+        )
+
+    async def async_step_zha_select_for_timeout(self, user_input=None):
+        """Select which ZHA device to change the inactivity timeout for."""
+        zha_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
+        if not zha_targets:
+            return await self.async_step_menu()
+
+        if user_input is not None:
+            self._zha_selected_ieee = user_input["ieee"]
+            return await self.async_step_zha_update_timeout()
+
+        devices = {
+            t[CONF_ZHA_IEEE]: f"{t.get('device_name', t[CONF_ZHA_IEEE])} ({t[CONF_ZHA_IEEE]})"
+            for t in sorted(zha_targets, key=lambda x: x.get("device_name", ""))
+        }
+        return self.async_show_form(
+            step_id="zha_select_for_timeout",
+            data_schema=vol.Schema({
+                vol.Required("ieee"): vol.In(devices),
+            }),
+        )
+
+    async def async_step_zha_update_timeout(self, user_input=None):
+        """Update the inactivity timeout for the selected ZHA device."""
+        current_timeout = DEFAULT_INACTIVE_TIMEOUT
+        for t in self._targets:
+            if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee:
+                current_timeout = t.get(CONF_INACTIVE_TIMEOUT, DEFAULT_INACTIVE_TIMEOUT)
+                break
+
+        if user_input is not None:
+            for t in self._targets:
+                if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee:
+                    t[CONF_INACTIVE_TIMEOUT] = user_input[CONF_INACTIVE_TIMEOUT]
+
+            self.config_data[CONF_TARGETS] = self._targets
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=self.config_data
+            )
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            return self.async_create_entry(title="", data={})
+
+        return self.async_show_form(
+            step_id="zha_update_timeout",
+            data_schema=vol.Schema({
+                vol.Required(CONF_INACTIVE_TIMEOUT, default=current_timeout): vol.All(
+                    vol.Coerce(int), vol.Range(min=5, max=1440)
+                ),
+            }),
         )
 
     async def async_step_settings(self, user_input=None):

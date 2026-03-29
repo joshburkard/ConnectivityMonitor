@@ -112,12 +112,50 @@
                     "interval": "Update interval (seconds)",
                     "dns_server": "DNS Server"
                 }
+            },
+            "zha_device": {
+                "title": "Add ZigBee Device (ZHA)",
+                "description": "Select a ZigBee device discovered by ZHA to monitor",
+                "data": {
+                    "ieee": "ZigBee Device"
+                }
+            },
+            "zha_configure": {
+                "title": "Configure ZigBee Device",
+                "description": "Set a friendly name and inactivity timeout for **{device_name}** ({ieee})",
+                "data": {
+                    "device_name": "Device Name (optional)",
+                    "inactive_timeout": "Inactivity Timeout (minutes)"
+                }
+            },
+            "remove_zha_device": {
+                "title": "Remove ZigBee Device (ZHA)",
+                "description": "Select the ZigBee device to stop monitoring",
+                "data": {
+                    "ieee": "ZigBee Device"
+                }
+            },
+            "zha_select_for_timeout": {
+                "title": "Change ZigBee Inactivity Timeout",
+                "description": "Select the ZigBee device to update",
+                "data": {
+                    "ieee": "ZigBee Device"
+                }
+            },
+            "zha_update_timeout": {
+                "title": "Update Inactivity Timeout",
+                "description": "A device is considered Inactive when it has not been seen within the configured timeout",
+                "data": {
+                    "inactive_timeout": "Inactivity Timeout (minutes)"
+                }
             }
         },
         "error": {
             "no_notify_groups": "No notification groups found. Please set up notification groups in Home Assistant first.",
             "invalid_dns_server": "Invalid DNS server IP address",
-            "invalid_host": "Host cannot be empty"
+            "invalid_host": "Host cannot be empty",
+            "no_zha_devices": "No ZigBee devices found. Make sure ZHA is configured and has discovered devices.",
+            "all_zha_devices_added": "All discovered ZigBee devices are already being monitored."
         }
     }
 }

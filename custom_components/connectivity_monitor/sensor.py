@@ -44,13 +44,17 @@ from .const import (
     CONF_INTERVAL,
     CONF_TARGETS,
     CONF_DNS_SERVER,
-    CONF_ALERT_GROUP,    # Added
-    CONF_ALERT_DELAY,    # Added
-    DEFAULT_ALERT_DELAY, # Added
+    CONF_ALERT_GROUP,
+    CONF_ALERT_DELAY,
+    DEFAULT_ALERT_DELAY,
     PROTOCOL_ICMP,
     PROTOCOL_AD_DC,
     PROTOCOL_TCP,
     PROTOCOL_UDP,
+    PROTOCOL_ZHA,
+    CONF_ZHA_IEEE,
+    CONF_INACTIVE_TIMEOUT,
+    DEFAULT_INACTIVE_TIMEOUT,
     DEFAULT_PING_TIMEOUT,
     DEFAULT_DNS_SERVER,
     DEFAULT_INTERVAL,
@@ -76,6 +80,10 @@ async def async_setup_entry(
                  update_interval, dns_server)
     _LOGGER.debug("Targets to process: %s", targets)
 
+    # Separate ZHA targets from regular network targets
+    network_targets = [t for t in targets if t.get(CONF_PROTOCOL) != PROTOCOL_ZHA]
+    zha_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
+
     # Create alert handler
     alert_handler = AlertHandler(hass)
     hass.data[DOMAIN][entry.entry_id]["alert_handler"] = alert_handler
@@ -86,9 +94,9 @@ async def async_setup_entry(
     new_unique_ids = set()
     entities = []
 
-    # Group targets by host
+    # Group network targets by host
     host_targets = {}
-    for target in targets:
+    for target in network_targets:
         host = target[CONF_HOST]
         if host not in host_targets:
             host_targets[host] = []
@@ -97,7 +105,7 @@ async def async_setup_entry(
     _LOGGER.debug("Grouped targets by host: %s",
                  {host: [t.get(CONF_PROTOCOL) for t in targets] for host, targets in host_targets.items()})
 
-    # Process each host
+    # Process each network host
     for host, host_target_list in host_targets.items():
         _LOGGER.debug("Processing host %s with targets: %s",
                      host, [f"{t[CONF_PROTOCOL]}:{t.get(CONF_PORT, 'N/A')}" for t in host_target_list])
@@ -168,6 +176,19 @@ async def async_setup_entry(
                 _LOGGER.exception("Error creating overview sensors for host %s: %s", host, err)
 
         _LOGGER.debug("Completed processing for host %s. Created %d sensors", host, len(entities))
+
+    # Process ZHA device targets
+    for target in zha_targets:
+        try:
+            coordinator = ZHACoordinator(hass, target, update_interval)
+            await coordinator.async_config_entry_first_refresh()
+            sensor = ZHASensor(coordinator, target)
+            entities.append(sensor)
+            new_unique_ids.add(sensor.unique_id)
+            _LOGGER.debug("Created ZHA sensor: entity_id=%s, unique_id=%s",
+                         sensor.entity_id, sensor.unique_id)
+        except Exception as err:
+            _LOGGER.exception("Error creating ZHA sensor for target %s: %s", target, err)
 
     # Remove old entities
     for entity in existing_entities:
@@ -933,3 +954,110 @@ class ADOverviewSensor(CoordinatorEntity, SensorEntity):
         elif self.native_value == "Partially Connected":
             return "mdi:domain-remove"
         return "mdi:domain-off"
+
+
+class ZHACoordinator(DataUpdateCoordinator):
+    """Manages polling ZHA last_seen for a single ZigBee device."""
+
+    def __init__(self, hass: HomeAssistant, target: dict, update_interval: int) -> None:
+        """Initialize the ZHA coordinator."""
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            update_interval=timedelta(seconds=update_interval),
+        )
+        self.target = target
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Fetch last_seen from ZHA gateway and compute active/inactive status."""
+        from .zha import async_get_zha_device_last_seen
+
+        ieee = self.target[CONF_ZHA_IEEE]
+        timeout_minutes = self.target.get(CONF_INACTIVE_TIMEOUT, DEFAULT_INACTIVE_TIMEOUT)
+
+        last_seen = await async_get_zha_device_last_seen(self.hass, ieee)
+
+        active = False
+        minutes_ago = None
+        if last_seen is not None:
+            elapsed = datetime.now().timestamp() - last_seen
+            minutes_ago = round(elapsed / 60, 1)
+            active = elapsed < (timeout_minutes * 60)
+
+        return {
+            "active": active,
+            "last_seen": last_seen,
+            "minutes_ago": minutes_ago,
+        }
+
+
+class ZHASensor(CoordinatorEntity, SensorEntity):
+    """Sensor for a ZHA (ZigBee) device activity status based on last_seen."""
+
+    def __init__(self, coordinator: ZHACoordinator, target: dict) -> None:
+        """Initialize the ZHA sensor."""
+        super().__init__(coordinator)
+        self.target = target
+        self._attr_has_entity_name = True
+        self._attr_available = True
+
+        device_name = target.get("device_name", target[CONF_ZHA_IEEE])
+        safe_name = (
+            device_name.lower()
+            .replace(" ", "_")
+            .replace("-", "_")
+            .replace(".", "_")
+            .replace(":", "_")
+        )
+
+        self._attr_name = "ZigBee Status"
+        self.entity_id = f"sensor.connectivity_monitor_zha_{safe_name}"
+
+        # Use "zha_" prefix on unique_id to avoid any collision with MAC-based network sensors
+        ieee_clean = target[CONF_ZHA_IEEE].replace(":", "").replace("-", "")
+        self._attr_unique_id = f"connectivity_zha_{ieee_clean}"
+
+        # Device identifier uses "host" field (= "zha:{ieee}") so the shared
+        # remove-device logic in config_flow can locate it by the same key.
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, target[CONF_HOST])},
+            name=device_name,
+            manufacturer=target.get("manufacturer", "ZigBee"),
+            model=target.get("model", "ZigBee Device"),
+            sw_version=VERSION,
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return Active / Inactive / Unknown."""
+        if not self.coordinator.data:
+            return "Unknown"
+        return "Active" if self.coordinator.data.get("active") else "Inactive"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes used by the panel."""
+        ieee = self.target[CONF_ZHA_IEEE]
+        timeout = self.target.get(CONF_INACTIVE_TIMEOUT, DEFAULT_INACTIVE_TIMEOUT)
+        attrs = {
+            "ieee": ieee,
+            "device_name": self.target.get("device_name", ieee),
+            "timeout_minutes": timeout,
+            "monitor_type": "zha",
+        }
+        if self.coordinator.data:
+            raw_ts = self.coordinator.data.get("last_seen")
+            if raw_ts is not None:
+                attrs["last_seen"] = datetime.fromtimestamp(raw_ts).isoformat()
+            minutes_ago = self.coordinator.data.get("minutes_ago")
+            if minutes_ago is not None:
+                attrs["minutes_ago"] = minutes_ago
+        return attrs
+
+    @property
+    def icon(self) -> str:
+        """Return the icon to use in the frontend."""
+        if self.coordinator.data and self.coordinator.data.get("active"):
+            return "mdi:zigbee"
+        return "mdi:lan-disconnect"
