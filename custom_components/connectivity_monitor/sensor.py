@@ -156,10 +156,9 @@ async def async_setup_entry(
                 _LOGGER.debug("Created overview sensor: entity_id=%s, unique_id=%s",
                             overview.entity_id, overview.unique_id)
 
-                # Set up alerts if configured
-                if first_target.get(CONF_ALERT_GROUP) or first_target.get(CONF_ALERT_ACTION):
-                    entity_id = f"sensor.connectivity_monitor_{safe_device_name}_overall"
-                    await alert_handler.async_setup_alerts(entity_id, overview_coordinator)
+                # Pass alert_handler into overview sensor so it can self-register
+                # in async_added_to_hass using its final HA-assigned entity_id.
+                overview._alert_handler = alert_handler
 
                 # Create AD overview if needed
                 if ad_coordinators:
@@ -170,10 +169,6 @@ async def async_setup_entry(
                     new_unique_ids.add(ad_overview.unique_id)
                     _LOGGER.debug("Created AD overview sensor: entity_id=%s, unique_id=%s",
                                 ad_overview.entity_id, ad_overview.unique_id)
-
-                    if first_target.get(CONF_ALERT_GROUP) or first_target.get(CONF_ALERT_ACTION):
-                        entity_id = f"sensor.connectivity_monitor_{safe_device_name}_ad"
-                        await alert_handler.async_setup_alerts(entity_id, overview_coordinator)
 
             except Exception as err:
                 _LOGGER.exception("Error creating overview sensors for host %s: %s", host, err)
@@ -190,8 +185,9 @@ async def async_setup_entry(
             new_unique_ids.add(sensor.unique_id)
             _LOGGER.debug("Created ZHA sensor: entity_id=%s, unique_id=%s",
                          sensor.entity_id, sensor.unique_id)
-            if target.get(CONF_ALERT_GROUP) or target.get(CONF_ALERT_ACTION):
-                await alert_handler.async_setup_alerts(sensor.entity_id, coordinator)
+            # Pass alert_handler into ZHA sensor so it can self-register in
+            # async_added_to_hass using its final HA-assigned entity_id.
+            sensor._alert_handler = alert_handler
         except Exception as err:
             _LOGGER.exception("Error creating ZHA sensor for target %s: %s", target, err)
 
@@ -221,6 +217,11 @@ class AlertHandler:
         self._action_fired = {}
         self._callbacks = {}
         self._targets = {}  # Store target info for each entity
+        # Tracks the timestamp when a device first entered a recovery state.
+        # We require the recovery to persist for at least one full timer cycle
+        # before clearing alert tracking, so brief false-positive "Connected"
+        # states don't reset the alert delay countdown.
+        self._recovering_since: dict = {}
         self._check_timer = None
         self._setup_alert_timer()
         _LOGGER.debug("AlertHandler initialized")
@@ -250,6 +251,27 @@ class AlertHandler:
         """Check all monitored entities for alerts."""
         current_time = datetime.now()
 
+        # Safety net: pick up any entity that is already in a problem state
+        # but whose state-change event may have been missed (e.g., already
+        # disconnected when HA loaded).  Only start tracking here, the main
+        # loop below will handle the delay check on the *next* timer tick.
+        for eid, tgt in self._targets.items():
+            if eid in self._last_disconnected:
+                continue
+            is_zha_chk = tgt.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+            problem_states_chk = ["Inactive"] if is_zha_chk else ["Disconnected", "Not Connected", "Partially Connected"]
+            cur_state = self.hass.states.get(eid)
+            if cur_state and cur_state.state in problem_states_chk:
+                self._last_disconnected[eid] = current_time
+                self._notified[eid] = self._notified.get(eid, False)
+                self._action_fired[eid] = self._action_fired.get(eid, False)
+                ident = tgt.get(CONF_ZHA_IEEE, tgt.get(CONF_HOST, eid)) if is_zha_chk else tgt.get(CONF_HOST, eid)
+                _LOGGER.info(
+                    "Connectivity Monitor: safety-net — detected %s already in state '%s', started tracking",
+                    tgt.get("device_name", ident),
+                    cur_state.state,
+                )
+
         for entity_id, disconnect_time in list(self._last_disconnected.items()):
             if entity_id not in self._targets:
                 continue
@@ -257,13 +279,67 @@ class AlertHandler:
             target = self._targets[entity_id]
             is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
             problem_states = ["Inactive"] if is_zha else ["Disconnected", "Not Connected", "Partially Connected"]
+            recovery_state = "Active" if is_zha else "Connected"
             identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST]) if is_zha else target[CONF_HOST]
             device_name = target.get("device_name", identifier)
             elapsed_minutes = (current_time - disconnect_time).total_seconds() / 60
 
-            _LOGGER.debug("Timer check for %s: %.1f minutes elapsed", device_name, elapsed_minutes)
-
             state = self.hass.states.get(entity_id)
+            current_state = state.state if state else "unknown"
+
+            # Handle pending recovery confirmation
+            if entity_id in self._recovering_since:
+                if current_state != recovery_state:
+                    # Device dropped back into problem state — cancel recovery
+                    self._recovering_since.pop(entity_id, None)
+                    _LOGGER.info(
+                        "Connectivity Monitor: %s dropped back to '%s' — recovery cancelled",
+                        device_name, current_state,
+                    )
+                else:
+                    recovery_held = (current_time - self._recovering_since[entity_id]).total_seconds()
+                    if recovery_held >= 60:
+                        _LOGGER.info(
+                            "Connectivity Monitor: recovery confirmed for %s after %.0fs",
+                            device_name, recovery_held,
+                        )
+                        cur_alert_group = target.get(CONF_ALERT_GROUP)
+                        cur_alert_action = target.get(CONF_ALERT_ACTION)
+                        recover_label = "active again" if is_zha else "connected"
+                        if self._notified.get(entity_id) and cur_alert_group:
+                            message = f"✅ Device {device_name} ({identifier}) has recovered and is now {recover_label}"
+                            await self._async_send_notification(cur_alert_group, message)
+                        if self._action_fired.get(entity_id) and cur_alert_action:
+                            offline_minutes = (current_time - disconnect_time).total_seconds() / 60
+                            recovery_variables = {
+                                "device_name": device_name,
+                                "device_address": identifier,
+                                "last_online": disconnect_time.strftime("%Y-%m-%d %H:%M:%S"),
+                                "minutes_offline": int(offline_minutes),
+                                "hours_offline": round(offline_minutes / 60, 1),
+                                "recovered": True,
+                            }
+                            await self._async_trigger_action(cur_alert_action, recovery_variables)
+                        self._last_disconnected.pop(entity_id, None)
+                        self._recovering_since.pop(entity_id, None)
+                        self._notified[entity_id] = False
+                        self._action_fired[entity_id] = False
+                    else:
+                        _LOGGER.info(
+                            "Connectivity Monitor: %s recovery pending (%.0fs / 60s held)",
+                            device_name, recovery_held,
+                        )
+                continue
+
+            _LOGGER.info(
+                "Connectivity Monitor: timer — %s state='%s' elapsed=%.1f min "
+                "(action_delay=%s min, action=%s, action_fired=%s)",
+                device_name, current_state, elapsed_minutes,
+                target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
+                target.get(CONF_ALERT_ACTION, "none"),
+                self._action_fired.get(entity_id, False),
+            )
+
             if not state or state.state not in problem_states:
                 continue
 
@@ -300,35 +376,30 @@ class AlertHandler:
             if not self._action_fired.get(entity_id, False):
                 alert_action = target.get(CONF_ALERT_ACTION)
                 action_delay = target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+                _LOGGER.info(
+                    "Connectivity Monitor: action check for %s — action='%s' elapsed=%.1f delay=%s",
+                    device_name, alert_action or "none", elapsed_minutes, action_delay,
+                )
                 if alert_action and elapsed_minutes >= action_delay:
                     await self._async_trigger_action(alert_action, context_variables)
                     self._action_fired[entity_id] = True
-                    _LOGGER.debug("Action triggered for %s after %.1f minutes", device_name, elapsed_minutes)
+                    _LOGGER.info("Connectivity Monitor: action triggered for %s after %.1f minutes", device_name, elapsed_minutes)
 
     async def _async_trigger_action(self, action_entity_id: str, variables: dict | None = None) -> None:
-        """Trigger an automation or script, optionally passing context variables."""
+        """Trigger an automation or script via a custom event so variables are accessible."""
         try:
-            domain = action_entity_id.split(".")[0] if "." in action_entity_id else ""
-            call_data: dict = {"entity_id": action_entity_id}
-            if variables:
-                call_data["variables"] = variables
-            if domain == "automation":
-                await self.hass.services.async_call(
-                    "automation", "trigger",
-                    call_data,
-                    blocking=True,
-                )
-            elif domain == "script":
-                await self.hass.services.async_call(
-                    "script", "turn_on",
-                    call_data,
-                    blocking=True,
-                )
-            else:
-                _LOGGER.warning("Unsupported action entity domain: %s", action_entity_id)
-            _LOGGER.debug("Successfully triggered action: %s", action_entity_id)
+            event_type = "connectivity_monitor_alert"
+            event_data = dict(variables) if variables else {}
+            event_data["action_entity_id"] = action_entity_id
+
+            _LOGGER.warning(
+                "Connectivity Monitor: firing event '%s' with data %s",
+                event_type, event_data
+            )
+            self.hass.bus.async_fire(event_type, event_data)
+            _LOGGER.info("Connectivity Monitor: event '%s' fired successfully", event_type)
         except Exception as err:
-            _LOGGER.error("Failed to trigger action %s: %s", action_entity_id, str(err))
+            _LOGGER.error("Connectivity Monitor: failed to fire event: %s", str(err))
 
     async def _async_send_notification(self, service: str, message: str) -> None:
         """Send a notification."""
@@ -359,11 +430,13 @@ class AlertHandler:
         if not alert_group and not alert_action:
             return
 
-        _LOGGER.debug(
-            "Setting up alerts for %s (group=%s, action=%s)",
+        action_delay = target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+        _LOGGER.info(
+            "Connectivity Monitor: setting up alerts for %s — group=%s, action=%s, action_delay=%s min",
             entity_id,
-            alert_group,
-            alert_action,
+            alert_group or "none",
+            alert_action or "none",
+            action_delay,
         )
 
         # Store target info for timer checks
@@ -395,8 +468,8 @@ class AlertHandler:
             device_name = target.get("device_name", identifier)
 
             # Log state changes
-            _LOGGER.debug(
-                "State change for %s: %s -> %s",
+            _LOGGER.info(
+                "Connectivity Monitor: state change for %s: %s -> %s",
                 device_name,
                 old_state.state if old_state else "None",
                 new_state.state
@@ -404,6 +477,8 @@ class AlertHandler:
 
             # Device has entered a problem state
             if new_state.state in problem_states:
+                # Cancel any in-progress recovery confirmation.
+                self._recovering_since.pop(entity_id, None)
                 # Only start timing if we weren't already in a problem state
                 if entity_id not in self._last_disconnected or (
                     old_state and old_state.state not in problem_states
@@ -411,8 +486,8 @@ class AlertHandler:
                     self._last_disconnected[entity_id] = current_time
                     self._notified[entity_id] = False
                     self._action_fired[entity_id] = False
-                    _LOGGER.debug(
-                        "Started monitoring %s in %s state at %s",
+                    _LOGGER.info(
+                        "Connectivity Monitor: started tracking %s as %s since %s",
                         device_name,
                         new_state.state,
                         current_time.strftime("%H:%M:%S")
@@ -421,34 +496,17 @@ class AlertHandler:
             # Device has recovered
             elif new_state.state == recovery_state:
                 if entity_id in self._last_disconnected:
-                    cur_alert_group = target.get(CONF_ALERT_GROUP)
-                    cur_alert_action = target.get(CONF_ALERT_ACTION)
-                    recover_label = "active again" if is_zha else "connected"
-                    # Send recovery notification if we previously notified
-                    if self._notified.get(entity_id) and cur_alert_group:
-                        message = f"✅ Device {device_name} ({identifier}) has recovered and is now {recover_label}"
-                        await self._async_send_notification(cur_alert_group, message)
-                        _LOGGER.debug("Recovery notification sent for %s", device_name)
-                    # Trigger recovery action if we previously fired an action
-                    if self._action_fired.get(entity_id) and cur_alert_action:
-                        offline_since = self._last_disconnected[entity_id]
-                        offline_minutes = (datetime.now() - offline_since).total_seconds() / 60
-                        recovery_variables = {
-                            "device_name": device_name,
-                            "device_address": identifier,
-                            "last_online": offline_since.strftime("%Y-%m-%d %H:%M:%S"),
-                            "minutes_offline": int(offline_minutes),
-                            "hours_offline": round(offline_minutes / 60, 1),
-                            "recovered": True,
-                        }
-                        await self._async_trigger_action(cur_alert_action, recovery_variables)
-                        _LOGGER.debug("Recovery action triggered for %s", device_name)
-
-                    # Clear tracking
-                    self._last_disconnected.pop(entity_id, None)
-                    self._notified[entity_id] = False
-                    self._action_fired[entity_id] = False
-                    _LOGGER.debug("Cleared monitoring for %s after recovery", device_name)
+                    # Start the recovery confirmation window.  The actual
+                    # recovery processing (notifications, actions, cleanup) is
+                    # handled by _check_alerts once the recovery has been
+                    # stable for ≥ 60 s, so that brief false-positive "Connected"
+                    # polls don't reset the alert delay countdown.
+                    if entity_id not in self._recovering_since:
+                        self._recovering_since[entity_id] = datetime.now()
+                        _LOGGER.info(
+                            "Connectivity Monitor: %s entered recovery state — confirming in 60s",
+                            device_name,
+                        )
 
         @callback
         def state_change_callback(event):
@@ -557,14 +615,31 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
 
             elif protocol == PROTOCOL_ICMP:
                 try:
+                    # ping3 returns None on timeout, False on network/permission
+                    # error, and a float (ms) when the host replies.
+                    # Two consecutive pings are required before declaring
+                    # "Connected" to eliminate false positives caused by
+                    # stale/delayed ICMP Echo Replies, proxy-ARP responses,
+                    # or brief network flaps that can fool a single ping.
+                    def _do_icmp_ping(ip: str, timeout: int):
+                        rt1 = ping(ip, timeout, "ms")
+                        if not isinstance(rt1, float) or rt1 < 0:
+                            return None
+                        rt2 = ping(ip, timeout, "ms")
+                        if not isinstance(rt2, float) or rt2 < 0:
+                            return None
+                        return (rt1 + rt2) / 2
+
                     response_time = await self.hass.async_add_executor_job(
-                        ping, self._resolved_ip, DEFAULT_PING_TIMEOUT, 1
+                        _do_icmp_ping, self._resolved_ip, DEFAULT_PING_TIMEOUT
                     )
-                    if response_time is not None:
+                    if isinstance(response_time, float):
                         result.update({
                             "connected": True,
-                            "latency": round(response_time * 1000, 2)
+                            "latency": round(response_time, 2)
                         })
+                    else:
+                        _LOGGER.debug("ICMP ping non-response for %s: %r", self._resolved_ip, response_time)
                 except Exception as err:
                     _LOGGER.debug("ICMP ping failed: %s", err)
 
@@ -854,6 +929,11 @@ class OverviewSensor(CoordinatorEntity, SensorEntity):
                 self.async_on_remove(
                     coord.async_add_listener(self.async_write_ha_state)
                 )
+        # Set up alerts here so self.entity_id is the final HA-registry value,
+        # not the one computed at __init__ time (which may differ after a rename).
+        alert_handler = getattr(self, "_alert_handler", None)
+        if alert_handler and (self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)):
+            await alert_handler.async_setup_alerts(self.entity_id, self.coordinator)
 
     @property
     def native_value(self) -> str:
@@ -1145,3 +1225,10 @@ class ZHASensor(CoordinatorEntity, SensorEntity):
         if self.coordinator.data and self.coordinator.data.get("active"):
             return "mdi:zigbee"
         return "mdi:lan-disconnect"
+
+    async def async_added_to_hass(self) -> None:
+        """Set up alerts after entity_id is finalised by HA registry."""
+        await super().async_added_to_hass()
+        alert_handler = getattr(self, "_alert_handler", None)
+        if alert_handler and (self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)):
+            await alert_handler.async_setup_alerts(self.entity_id, self.coordinator)

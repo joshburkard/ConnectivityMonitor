@@ -3,38 +3,44 @@
 ```yaml
 automation:
   alias: "Connectivity Monitor - Device Alert"
-  description: "Triggered by Connectivity Monitor. No trigger block needed."
   mode: parallel
   max: 10
-  trigger: []
+  trigger:
+    - platform: event
+      event_type: connectivity_monitor_alert
+      # Optional: only react when this automation is the chosen action target:
+      # event_data:
+      #   action_entity_id: automation.connectivity_monitor_device_alert
   action:
     - choose:
         - conditions:
             - condition: template
-              value_template: "{{ recovered is defined and recovered }}"
+              value_template: "{{ trigger.event.data.get('recovered', false) }}"
           sequence:
             - service: notify.mobile_app_my_phone
               data:
-                title: "✅ Device back online: {{ device_name }}"
+                title: "✅ {{ trigger.event.data.device_name }} is back online"
                 message: >-
-                  {{ device_name }} ({{ device_address }}) is back online.
-                  It was offline for
-                  {% if hours_offline >= 1 %}
-                    {{ hours_offline }} hour(s)
+                  {{ trigger.event.data.device_name }}
+                  ({{ trigger.event.data.device_address }}) recovered.
+                  Was offline for
+                  {% if trigger.event.data.hours_offline >= 1 %}
+                    {{ trigger.event.data.hours_offline }} hr(s)
                   {% else %}
-                    {{ minutes_offline }} minute(s)
+                    {{ trigger.event.data.minutes_offline }} min(s)
                   {% endif %}
-                  (down since {{ last_online }})
+                  — last seen: {{ trigger.event.data.last_online }}
       default:
         - service: notify.mobile_app_my_phone
           data:
-            title: "❌ Device offline: {{ device_name }}"
+            title: "❌ {{ trigger.event.data.device_name }} is offline"
             message: >-
-              {{ device_name }} ({{ device_address }}) has been offline for
-              {% if hours_offline >= 1 %}
-                {{ hours_offline }} hour(s)
+              {{ trigger.event.data.device_name }}
+              ({{ trigger.event.data.device_address }}) offline for
+              {% if trigger.event.data.hours_offline >= 1 %}
+                {{ trigger.event.data.hours_offline }} hr(s)
               {% else %}
-                {{ minutes_offline }} minute(s)
+                {{ trigger.event.data.minutes_offline }} min(s)
               {% endif %}
-              (last seen: {{ last_online }})
+              — last seen: {{ trigger.event.data.last_online }}
 ```
