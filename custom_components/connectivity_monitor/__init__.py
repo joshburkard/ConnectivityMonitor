@@ -11,9 +11,81 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_validation as cv
 
-from .const import DOMAIN, CONF_TARGETS
+from .const import (
+    DOMAIN, CONF_TARGETS, CONF_INTERVAL, CONF_DNS_SERVER,
+    PROTOCOL_ZHA, PROTOCOL_MATTER, DEFAULT_INTERVAL, DEFAULT_DNS_SERVER,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
+    """Migrate an old combined entry (v1) into three typed entries (v2)."""
+    from homeassistant.config_entries import SOURCE_IMPORT
+
+    if config_entry.version == 1:
+        _LOGGER.info(
+            "Connectivity Monitor: migrating config entry '%s' from v1 to v2 "
+            "(splitting into typed entries)", config_entry.title
+        )
+
+        targets = list(config_entry.data.get(CONF_TARGETS, []))
+        interval = config_entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL)
+        dns_server = config_entry.data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER)
+
+        network_targets = [t for t in targets if t.get("protocol") not in (PROTOCOL_ZHA, PROTOCOL_MATTER)]
+        zha_targets    = [t for t in targets if t.get("protocol") == PROTOCOL_ZHA]
+        matter_targets = [t for t in targets if t.get("protocol") == PROTOCOL_MATTER]
+
+        # Schedule creation of a ZigBee Monitor entry (if ZHA devices exist)
+        if zha_targets:
+            hass.async_create_task(
+                hass.config_entries.flow.async_init(
+                    DOMAIN,
+                    context={"source": SOURCE_IMPORT},
+                    data={
+                        CONF_TARGETS: zha_targets,
+                        CONF_INTERVAL: interval,
+                        CONF_DNS_SERVER: dns_server,
+                        "entry_type": "zha",
+                    },
+                )
+            )
+
+        # Schedule creation of a Matter Monitor entry (if Matter devices exist)
+        if matter_targets:
+            hass.async_create_task(
+                hass.config_entries.flow.async_init(
+                    DOMAIN,
+                    context={"source": SOURCE_IMPORT},
+                    data={
+                        CONF_TARGETS: matter_targets,
+                        CONF_INTERVAL: interval,
+                        CONF_DNS_SERVER: dns_server,
+                        "entry_type": "matter",
+                    },
+                )
+            )
+
+        # Convert the current entry into the Network Monitor entry
+        hass.config_entries.async_update_entry(
+            config_entry,
+            title="Network Monitor",
+            unique_id="connectivity_monitor_network",
+            data={
+                CONF_TARGETS: network_targets,
+                CONF_INTERVAL: interval,
+                CONF_DNS_SERVER: dns_server,
+            },
+            version=2,
+        )
+
+        _LOGGER.info(
+            "Connectivity Monitor: migration complete — %d network, %d ZigBee, %d Matter devices",
+            len(network_targets), len(zha_targets), len(matter_targets),
+        )
+
+    return True
 
 # We only need the sensor platform since alerts are handled within the sensor code
 PLATFORMS: list[Platform] = [Platform.SENSOR]

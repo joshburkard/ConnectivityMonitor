@@ -60,7 +60,19 @@ def is_valid_ip(ip: str) -> bool:
 
 class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Connectivity Monitor."""
-    VERSION = 1
+    VERSION = 2
+
+    # Unique IDs and titles for each typed entry
+    ENTRY_UNIQUE_IDS = {
+        "network": "connectivity_monitor_network",
+        "zha": "connectivity_monitor_zha",
+        "matter": "connectivity_monitor_matter",
+    }
+    ENTRY_TITLES = {
+        "network": "Network Monitor",
+        "zha": "ZigBee Monitor",
+        "matter": "Matter Monitor",
+    }
 
     def __init__(self):
         """Initialize the config flow."""
@@ -99,17 +111,32 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 actions[entity_id] = f"{name} ({entity_id})"
         return dict(sorted(actions.items(), key=lambda x: x[1].lower()))
 
+    async def async_step_import(self, data):
+        """Handle import from automated migration — creates a typed entry directly."""
+        entry_type = data.get("entry_type", "network")
+        unique_id = self.ENTRY_UNIQUE_IDS.get(entry_type, f"connectivity_monitor_{entry_type}")
+        await self.async_set_unique_id(unique_id)
+        self._abort_if_unique_id_configured()
+        return self.async_create_entry(
+            title=self.ENTRY_TITLES.get(entry_type, "Connectivity Monitor"),
+            data={
+                CONF_TARGETS: data.get(CONF_TARGETS, []),
+                CONF_INTERVAL: data.get(CONF_INTERVAL, DEFAULT_INTERVAL),
+                CONF_DNS_SERVER: data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER),
+            },
+        )
+
     async def async_step_user(self, user_input=None):
         """Handle a flow initiated by the user — choose device type."""
-        # Check if we already have an entry and carry its settings forward
+        # Copy shared settings (interval, DNS) from any existing entry but do NOT
+        # pre-populate targets — each device type now lives in its own typed entry.
         entries = self._async_current_entries()
         if entries:
             entry = entries[0]
-            existing_data = dict(entry.data)
             self._data = {
-                CONF_INTERVAL: existing_data[CONF_INTERVAL],
-                CONF_DNS_SERVER: existing_data[CONF_DNS_SERVER],
-                CONF_TARGETS: list(existing_data[CONF_TARGETS]),
+                CONF_INTERVAL: entry.data.get(CONF_INTERVAL, DEFAULT_INTERVAL),
+                CONF_DNS_SERVER: entry.data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER),
+                CONF_TARGETS: [],
             }
 
         if user_input is not None:
@@ -208,10 +235,13 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         from .zha import async_get_zha_devices
 
         entries = self._async_current_entries()
+        zha_entry = next(
+            (e for e in entries if e.unique_id == self.ENTRY_UNIQUE_IDS["zha"]), None
+        )
         existing_ieees = {
             t.get(CONF_ZHA_IEEE)
-            for t in self._data.get(CONF_TARGETS, [])
-            if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+            for t in (zha_entry.data.get(CONF_TARGETS, []) if zha_entry else [])
+            if t.get(CONF_ZHA_IEEE)
         }
 
         zha_devices = await async_get_zha_devices(self.hass)
@@ -328,10 +358,13 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         from .matter import async_get_matter_devices
 
         entries = self._async_current_entries()
+        matter_entry = next(
+            (e for e in entries if e.unique_id == self.ENTRY_UNIQUE_IDS["matter"]), None
+        )
         existing_node_ids = {
             t.get(CONF_MATTER_NODE_ID)
-            for t in self._data.get(CONF_TARGETS, [])
-            if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER
+            for t in (matter_entry.data.get(CONF_TARGETS, []) if matter_entry else [])
+            if t.get(CONF_MATTER_NODE_ID)
         }
 
         matter_devices = await async_get_matter_devices(self.hass)
@@ -493,20 +526,26 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_finish(self, user_input=None):
-        """Create or update the config entry."""
+        """Create or update the correct typed config entry."""
         entries = self._async_current_entries()
 
-        # For ZHA/Matter targets the target was already appended to self._data[CONF_TARGETS]
-        # in their configure steps; nothing else to add here.
-        if self._data.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER):
-            device_name = self._data.get("device_name", "").strip() or self._data[CONF_HOST]
+        # Determine which typed entry this device belongs to
+        protocol = self._data.get(CONF_PROTOCOL)
+        if protocol == PROTOCOL_ZHA:
+            entry_type = "zha"
+        elif protocol == PROTOCOL_MATTER:
+            entry_type = "matter"
+        else:
+            entry_type = "network"
 
-            if entries:
-                entry = entries[0]
-                existing_data = dict(entry.data)
-                targets = list(existing_data[CONF_TARGETS])
-            else:
-                targets = []
+        unique_id = self.ENTRY_UNIQUE_IDS[entry_type]
+
+        # Find the existing typed entry for this type (if any)
+        typed_entry = next((e for e in entries if e.unique_id == unique_id), None)
+
+        if entry_type == "network":
+            device_name = self._data.get("device_name", "").strip() or self._data[CONF_HOST]
+            targets = list(typed_entry.data[CONF_TARGETS]) if typed_entry else []
 
             base_target = {
                 CONF_HOST: self._data[CONF_HOST],
@@ -529,8 +568,24 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     base_target[CONF_PORT] = self._data[CONF_PORT]
                 targets.append(base_target)
         else:
-            # ZHA / Matter path: targets list was already updated in the configure step
-            targets = list(self._data.get(CONF_TARGETS, []))
+            # ZHA / Matter: new target was already appended in the configure step.
+            # Merge with any existing targets already stored in the typed entry.
+            new_items = list(self._data.get(CONF_TARGETS, []))
+            if typed_entry:
+                existing = list(typed_entry.data[CONF_TARGETS])
+                if entry_type == "zha":
+                    existing_keys = {t.get(CONF_ZHA_IEEE) for t in existing}
+                    for t in new_items:
+                        if t.get(CONF_ZHA_IEEE) not in existing_keys:
+                            existing.append(t)
+                else:  # matter
+                    existing_keys = {t.get(CONF_MATTER_NODE_ID) for t in existing}
+                    for t in new_items:
+                        if t.get(CONF_MATTER_NODE_ID) not in existing_keys:
+                            existing.append(t)
+                targets = existing
+            else:
+                targets = new_items
 
         data = {
             CONF_TARGETS: targets,
@@ -538,14 +593,15 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_DNS_SERVER: self._data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER),
         }
 
-        if entries:
-            entry = entries[0]
-            self.hass.config_entries.async_update_entry(entry, data=data)
-            await self.hass.config_entries.async_reload(entry.entry_id)
+        if typed_entry:
+            self.hass.config_entries.async_update_entry(typed_entry, data=data)
+            await self.hass.config_entries.async_reload(typed_entry.entry_id)
             return self.async_abort(reason="device_added")
 
+        await self.async_set_unique_id(unique_id)
+        self._abort_if_unique_id_configured()
         return self.async_create_entry(
-            title="Connectivity Monitor",
+            title=self.ENTRY_TITLES[entry_type],
             data=data,
         )
 
