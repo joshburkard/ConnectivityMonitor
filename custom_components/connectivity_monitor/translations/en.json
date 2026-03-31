@@ -89,9 +89,24 @@
     "options": {
         "step": {
             "menu": {
-                "title": "Modify Connectivity Monitor",
+                "title": "Connectivity Monitor",
+                "description": "Choose a device category to configure",
                 "data": {
-                    "next_step": "Choose action"
+                    "category": "Category"
+                }
+            },
+            "network_menu": {
+                "title": "Network Device",
+                "description": "Choose an action for your network device",
+                "data": {
+                    "action": "Action"
+                }
+            },
+            "zha_menu": {
+                "title": "ZigBee (ZHA) Device",
+                "description": "Choose an action for your ZigBee device",
+                "data": {
+                    "action": "Action"
                 }
             },
             "device_select": {

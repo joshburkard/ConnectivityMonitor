@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00036 | 31/03/2026 | changed structure of Config Flow |
 | 0.1.00035 | 30/03/2026 | fixing issue with ICMP sensor |
 | 0.1.00034 | 28/03/2026 | added Alert Actions for both Network and ZigBee devices |
 | 0.1.00033 | 28/03/2026 | add alert settings for ZigBee devices |

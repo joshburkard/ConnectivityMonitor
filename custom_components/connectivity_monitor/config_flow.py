@@ -462,39 +462,78 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return await self.async_step_menu()
 
     async def async_step_menu(self, user_input=None):
-        """Show the menu."""
+        """Show the top-level category menu."""
         if user_input is not None:
-            if user_input["next_step"] == "modify_alerts":
-                return await self.async_step_device_select()
-            elif user_input["next_step"] == "rename_device":
-                return await self.async_step_rename_device_select()
-            elif user_input["next_step"] == "remove_device":
-                return await self.async_step_remove_device()
-            elif user_input["next_step"] == "remove_sensor":
-                return await self.async_step_remove_sensor()
-            elif user_input["next_step"] == "settings":
+            category = user_input["category"]
+            if category == "network":
+                return await self.async_step_network_menu()
+            elif category == "zha":
+                return await self.async_step_zha_menu()
+            elif category == "settings":
                 return await self.async_step_settings()
-            elif user_input["next_step"] == "remove_zha_device":
-                return await self.async_step_remove_zha_device()
-            elif user_input["next_step"] == "zha_timeout":
-                return await self.async_step_zha_select_for_timeout()
-            elif user_input["next_step"] == "zha_alert_config":
-                return await self.async_step_zha_alert_select()
+
+        has_network = any(t.get(CONF_PROTOCOL) != PROTOCOL_ZHA for t in self._targets)
+        has_zha = any(t.get(CONF_PROTOCOL) == PROTOCOL_ZHA for t in self._targets)
+
+        categories = {}
+        if has_network:
+            categories["network"] = "Network Device"
+        if has_zha:
+            categories["zha"] = "ZigBee (ZHA) Device"
+        categories["settings"] = "General Settings"
 
         return self.async_show_form(
             step_id="menu",
             data_schema=vol.Schema({
-                vol.Required("next_step"): vol.In({
-                    "modify_alerts": "Modify Alert Settings",
-                    "rename_device": "Change Host / Device Name",
+                vol.Required("category"): vol.In(categories),
+            }),
+        )
+
+    async def async_step_network_menu(self, user_input=None):
+        """Show the Network Device sub-menu."""
+        if user_input is not None:
+            action = user_input["action"]
+            if action == "rename":
+                return await self.async_step_rename_device_select()
+            elif action == "alerts":
+                return await self.async_step_device_select()
+            elif action == "remove_device":
+                return await self.async_step_remove_device()
+            elif action == "remove_sensor":
+                return await self.async_step_remove_sensor()
+
+        return self.async_show_form(
+            step_id="network_menu",
+            data_schema=vol.Schema({
+                vol.Required("action"): vol.In({
+                    "rename": "Change Host / Device Name",
+                    "alerts": "Modify Alert Settings",
                     "remove_device": "Remove Device",
                     "remove_sensor": "Remove Single Sensor",
-                    "settings": "Change Settings",
-                    "remove_zha_device": "Remove ZigBee Device (ZHA)",
-                    "zha_timeout": "Change ZigBee Inactivity Timeout",
-                    "zha_alert_config": "Modify ZigBee Alert Settings",
-                })
-            })
+                }),
+            }),
+        )
+
+    async def async_step_zha_menu(self, user_input=None):
+        """Show the ZigBee (ZHA) Device sub-menu."""
+        if user_input is not None:
+            action = user_input["action"]
+            if action == "timeout":
+                return await self.async_step_zha_select_for_timeout()
+            elif action == "alerts":
+                return await self.async_step_zha_alert_select()
+            elif action == "remove":
+                return await self.async_step_remove_zha_device()
+
+        return self.async_show_form(
+            step_id="zha_menu",
+            data_schema=vol.Schema({
+                vol.Required("action"): vol.In({
+                    "timeout": "Change Inactivity Timeout",
+                    "alerts": "Modify Alert Settings",
+                    "remove": "Remove Device",
+                }),
+            }),
         )
 
     async def async_step_rename_device_select(self, user_input=None):
@@ -750,9 +789,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             await self.hass.config_entries.async_reload(self.config_entry.entry_id)
             return self.async_create_entry(title="", data={})
 
-        # Get unique devices
+        # Get unique network devices (ZHA devices are removed via their own step)
         devices = {}
         for target in self._targets:
+            if target.get(CONF_PROTOCOL) == PROTOCOL_ZHA:
+                continue
             device_name = target.get("device_name", target[CONF_HOST])
             devices[target[CONF_HOST]] = device_name
 
