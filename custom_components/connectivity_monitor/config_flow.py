@@ -41,9 +41,11 @@ from .const import (
     PROTOCOL_TCP,
     PROTOCOL_UDP,
     PROTOCOL_ZHA,
+    PROTOCOL_MATTER,
     CONF_ZHA_IEEE,
     CONF_INACTIVE_TIMEOUT,
     DEFAULT_INACTIVE_TIMEOUT,
+    CONF_MATTER_NODE_ID,
     AD_DC_PORTS
 )
 
@@ -68,6 +70,11 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._zha_selected_name: str | None = None
         self._zha_selected_model: str | None = None
         self._zha_selected_manufacturer: str | None = None
+        # Matter device selection state
+        self._matter_selected_node_id: str | None = None
+        self._matter_selected_name: str | None = None
+        self._matter_selected_model: str | None = None
+        self._matter_selected_manufacturer: str | None = None
 
     @staticmethod
     @callback
@@ -108,6 +115,8 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             if user_input["device_type"] == "zha":
                 return await self.async_step_zha_device()
+            elif user_input["device_type"] == "matter":
+                return await self.async_step_matter_device()
             else:
                 return await self.async_step_network()
 
@@ -117,6 +126,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required("device_type", default="network"): vol.In({
                     "network": "Network Device (TCP / UDP / ICMP / AD)",
                     "zha": "ZigBee Device (ZHA)",
+                    "matter": "Matter Device",
                 }),
             }),
         )
@@ -313,6 +323,121 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
+    async def async_step_matter_device(self, user_input=None):
+        """Select a Matter device to add to monitoring (main config flow)."""
+        from .matter import async_get_matter_devices
+
+        entries = self._async_current_entries()
+        existing_node_ids = {
+            t.get(CONF_MATTER_NODE_ID)
+            for t in self._data.get(CONF_TARGETS, [])
+            if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER
+        }
+
+        matter_devices = await async_get_matter_devices(self.hass)
+        if not matter_devices:
+            return self.async_show_form(
+                step_id="matter_device",
+                errors={"base": "no_matter_devices"},
+                data_schema=vol.Schema({}),
+            )
+
+        available = [d for d in matter_devices if d["node_id"] not in existing_node_ids]
+        if not available:
+            return self.async_show_form(
+                step_id="matter_device",
+                errors={"base": "all_matter_devices_added"},
+                data_schema=vol.Schema({}),
+            )
+
+        if user_input is not None:
+            self._matter_selected_node_id = user_input[CONF_MATTER_NODE_ID]
+            matched = next(
+                (d for d in matter_devices if d["node_id"] == self._matter_selected_node_id), {}
+            )
+            self._matter_selected_name = matched.get("name") or self._matter_selected_node_id
+            self._matter_selected_model = matched.get("model")
+            self._matter_selected_manufacturer = matched.get("manufacturer")
+            return await self.async_step_matter_configure()
+
+        device_choices = {
+            d["node_id"]: f"{d['name']} ({d['node_id']})"
+            for d in sorted(available, key=lambda x: x["name"].lower())
+        }
+        return self.async_show_form(
+            step_id="matter_device",
+            data_schema=vol.Schema({
+                vol.Required(CONF_MATTER_NODE_ID): vol.In(device_choices),
+            }),
+        )
+
+    async def async_step_matter_configure(self, user_input=None):
+        """Set device name, inactivity timeout, and alert settings for the selected Matter device."""
+        entries = self._async_current_entries()
+
+        if user_input is not None:
+            device_name = (user_input.get("device_name") or "").strip() or self._matter_selected_name
+            alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
+            action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
+            new_target = {
+                CONF_PROTOCOL: PROTOCOL_MATTER,
+                CONF_HOST: f"matter:{self._matter_selected_node_id}",
+                CONF_MATTER_NODE_ID: self._matter_selected_node_id,
+                "device_name": device_name,
+                CONF_ALERT_GROUP: (
+                    user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
+                ) if alerts_enabled else DEFAULT_ALERT_GROUP,
+                CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
+                CONF_ALERT_ACTION: (
+                    user_input.get(CONF_ALERT_ACTION, "") or ""
+                ) if action_enabled else "",
+                CONF_ALERT_ACTION_DELAY: user_input.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
+            }
+            if self._matter_selected_model:
+                new_target["model"] = self._matter_selected_model
+            if self._matter_selected_manufacturer:
+                new_target["manufacturer"] = self._matter_selected_manufacturer
+
+            targets = list(self._data.get(CONF_TARGETS, []))
+            targets.append(new_target)
+            self._data[CONF_TARGETS] = targets
+            self._data[CONF_PROTOCOL] = PROTOCOL_MATTER
+
+            if not entries:
+                return await self.async_step_dns()
+            return await self.async_step_finish()
+
+        notify_groups = await self._async_get_notify_groups()
+        alert_actions = await self._async_get_alert_actions()
+        schema = {
+            vol.Optional("device_name", default=self._matter_selected_name or ""): str,
+            vol.Optional(CONF_ALERTS_ENABLED, default=False): bool,
+            vol.Required(CONF_ALERT_DELAY, default=DEFAULT_ALERT_DELAY): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=60)
+            ),
+        }
+        if notify_groups:
+            notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
+            notify_groups_dict[""] = "No alert group"
+            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
+        schema[vol.Optional(CONF_ALERT_ACTION_ENABLED, default=False)] = bool
+        schema[vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)] = vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=120)
+        )
+        if alert_actions:
+            actions_dict = {"" : "No action"}
+            actions_dict.update(alert_actions)
+            schema[vol.Optional(CONF_ALERT_ACTION, default="")] = vol.In(actions_dict)
+
+        return self.async_show_form(
+            step_id="matter_configure",
+            data_schema=vol.Schema(schema),
+            description_placeholders={
+                "device_name": self._matter_selected_name or "",
+                "node_id": self._matter_selected_node_id or "",
+            },
+        )
+
     async def async_step_dns(self, user_input=None):
         """Handle DNS server configuration."""
         errors = {}
@@ -371,9 +496,9 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Create or update the config entry."""
         entries = self._async_current_entries()
 
-        # For ZHA targets the target was already appended to self._data[CONF_TARGETS]
-        # in async_step_zha_configure; nothing else to add here.
-        if self._data.get(CONF_PROTOCOL) != PROTOCOL_ZHA:
+        # For ZHA/Matter targets the target was already appended to self._data[CONF_TARGETS]
+        # in their configure steps; nothing else to add here.
+        if self._data.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER):
             device_name = self._data.get("device_name", "").strip() or self._data[CONF_HOST]
 
             if entries:
@@ -404,7 +529,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     base_target[CONF_PORT] = self._data[CONF_PORT]
                 targets.append(base_target)
         else:
-            # ZHA path: targets list was already updated in zha_configure
+            # ZHA / Matter path: targets list was already updated in the configure step
             targets = list(self._data.get(CONF_TARGETS, []))
 
         data = {
@@ -437,6 +562,11 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self._zha_selected_name: str | None = None
         self._zha_selected_model: str | None = None
         self._zha_selected_manufacturer: str | None = None
+        # Matter device selection state
+        self._matter_selected_node_id: str | None = None
+        self._matter_selected_name: str | None = None
+        self._matter_selected_model: str | None = None
+        self._matter_selected_manufacturer: str | None = None
 
     async def _async_get_notify_groups(self):
         """Get list of notification groups from Home Assistant."""
@@ -469,17 +599,22 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_network_menu()
             elif category == "zha":
                 return await self.async_step_zha_menu()
+            elif category == "matter":
+                return await self.async_step_matter_menu()
             elif category == "settings":
                 return await self.async_step_settings()
 
-        has_network = any(t.get(CONF_PROTOCOL) != PROTOCOL_ZHA for t in self._targets)
+        has_network = any(t.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER) for t in self._targets)
         has_zha = any(t.get(CONF_PROTOCOL) == PROTOCOL_ZHA for t in self._targets)
+        has_matter = any(t.get(CONF_PROTOCOL) == PROTOCOL_MATTER for t in self._targets)
 
         categories = {}
         if has_network:
             categories["network"] = "Network Device"
         if has_zha:
             categories["zha"] = "ZigBee (ZHA) Device"
+        if has_matter:
+            categories["matter"] = "Matter Device"
         categories["settings"] = "General Settings"
 
         return self.async_show_form(
@@ -536,12 +671,162 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             }),
         )
 
+    async def async_step_matter_menu(self, user_input=None):
+        """Show the Matter Device sub-menu."""
+        if user_input is not None:
+            action = user_input["action"]
+            if action == "alerts":
+                return await self.async_step_matter_alert_select()
+            elif action == "remove":
+                return await self.async_step_remove_matter_device()
+
+        return self.async_show_form(
+            step_id="matter_menu",
+            data_schema=vol.Schema({
+                vol.Required("action"): vol.In({
+                    "alerts": "Modify Alert Settings",
+                    "remove": "Remove Device",
+                }),
+            }),
+        )
+
+    async def async_step_matter_alert_select(self, user_input=None):
+        """Select which Matter device to configure alerts for."""
+        matter_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER]
+        if not matter_targets:
+            return await self.async_step_menu()
+
+        if user_input is not None:
+            self._matter_selected_node_id = user_input["node_id"]
+            return await self.async_step_matter_alert_config()
+
+        devices = {
+            t[CONF_MATTER_NODE_ID]: f"{t.get('device_name', t[CONF_MATTER_NODE_ID])} ({t[CONF_MATTER_NODE_ID]})"
+            for t in sorted(matter_targets, key=lambda x: x.get("device_name", ""))
+        }
+        return self.async_show_form(
+            step_id="matter_alert_select",
+            data_schema=vol.Schema({
+                vol.Required("node_id"): vol.In(devices),
+            }),
+        )
+
+    async def async_step_matter_alert_config(self, user_input=None):
+        """Configure alert settings for the selected Matter device."""
+        notify_groups = await self._async_get_notify_groups()
+        alert_actions = await self._async_get_alert_actions()
+
+        current_target = next(
+            (t for t in self._targets
+             if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER and t.get(CONF_MATTER_NODE_ID) == self._matter_selected_node_id),
+            {}
+        )
+        current_alert_group = current_target.get(CONF_ALERT_GROUP, "")
+        current_alert_delay = current_target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+        current_alerts_enabled = bool(current_alert_group)
+        current_alert_action = current_target.get(CONF_ALERT_ACTION, "")
+        current_action_delay = current_target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+        current_action_enabled = bool(current_alert_action)
+
+        if user_input is not None:
+            alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
+            alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
+            action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
+            alert_action = user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            for t in self._targets:
+                if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER and t.get(CONF_MATTER_NODE_ID) == self._matter_selected_node_id:
+                    if alert_group:
+                        t[CONF_ALERT_GROUP] = alert_group
+                    else:
+                        t.pop(CONF_ALERT_GROUP, None)
+                    t[CONF_ALERT_DELAY] = user_input[CONF_ALERT_DELAY]
+                    if alert_action:
+                        t[CONF_ALERT_ACTION] = alert_action
+                    else:
+                        t.pop(CONF_ALERT_ACTION, None)
+                    t[CONF_ALERT_ACTION_DELAY] = user_input[CONF_ALERT_ACTION_DELAY]
+
+            self.config_data[CONF_TARGETS] = self._targets
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=self.config_data
+            )
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            return self.async_create_entry(title="", data={})
+
+        notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
+        notify_groups_dict[""] = "No alert group"
+        schema = {
+            vol.Optional(CONF_ALERTS_ENABLED, default=current_alerts_enabled): bool,
+            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(notify_groups_dict),
+            vol.Required(CONF_ALERT_DELAY, default=current_alert_delay): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=60)
+            ),
+            vol.Optional(CONF_ALERT_ACTION_ENABLED, default=current_action_enabled): bool,
+            vol.Required(CONF_ALERT_ACTION_DELAY, default=current_action_delay): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=120)
+            ),
+        }
+        if alert_actions:
+            actions_dict = {"" : "No action"}
+            actions_dict.update(alert_actions)
+            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = vol.In(actions_dict)
+        return self.async_show_form(
+            step_id="matter_alert_config",
+            data_schema=vol.Schema(schema),
+        )
+
+    async def async_step_remove_matter_device(self, user_input=None):
+        """Remove a monitored Matter device."""
+        entity_registry = async_get_entity_registry(self.hass)
+
+        matter_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER]
+        if not matter_targets:
+            return await self.async_step_menu()
+
+        if user_input is not None:
+            node_id = user_input["node_id"]
+
+            # Remove from targets list
+            self._targets = [
+                t for t in self._targets
+                if not (t.get(CONF_PROTOCOL) == PROTOCOL_MATTER and t.get(CONF_MATTER_NODE_ID) == node_id)
+            ]
+
+            # Remove only our monitoring entity — the Matter device itself stays
+            node_id_clean = node_id.replace("-", "_").replace(":", "_")
+            unique_id = f"connectivity_matter_{node_id_clean}"
+            entry_entities = async_entries_for_config_entry(
+                entity_registry, self.config_entry.entry_id
+            )
+            for entity_entry in entry_entities:
+                if entity_entry.unique_id == unique_id:
+                    entity_registry.async_remove(entity_entry.entity_id)
+                    break
+
+            self.config_data[CONF_TARGETS] = self._targets
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=self.config_data
+            )
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            return self.async_create_entry(title="", data={})
+
+        devices = {
+            t[CONF_MATTER_NODE_ID]: f"{t.get('device_name', t[CONF_MATTER_NODE_ID])} ({t[CONF_MATTER_NODE_ID]})"
+            for t in sorted(matter_targets, key=lambda x: x.get("device_name", ""))
+        }
+        return self.async_show_form(
+            step_id="remove_matter_device",
+            data_schema=vol.Schema({
+                vol.Required("node_id"): vol.In(devices),
+            }),
+        )
+
     async def async_step_rename_device_select(self, user_input=None):
         """Select which device to rename (network devices only)."""
         devices = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) == PROTOCOL_ZHA:
-                continue  # ZHA devices don't support host renaming
+            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER):
+                continue  # ZHA and Matter devices don't support host renaming
             device_host = target[CONF_HOST]
             if device_host not in devices:
                 device_name = target.get("device_name", device_host)
@@ -638,10 +923,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_device_select(self, user_input=None):
         """First step of alert modification - device selection (network only)."""
-        # Get unique devices (skip ZHA targets — they don't use notify groups)
+        # Get unique devices (skip ZHA and Matter targets — they don't use notify groups)
         devices = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) == PROTOCOL_ZHA:
+            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER):
                 continue
             device_host = target[CONF_HOST]
             if device_host not in devices:
@@ -789,10 +1074,10 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             await self.hass.config_entries.async_reload(self.config_entry.entry_id)
             return self.async_create_entry(title="", data={})
 
-        # Get unique network devices (ZHA devices are removed via their own step)
+        # Get unique network devices (ZHA/Matter devices are removed via their own step)
         devices = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) == PROTOCOL_ZHA:
+            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER):
                 continue
             device_name = target.get("device_name", target[CONF_HOST])
             devices[target[CONF_HOST]] = device_name
@@ -848,8 +1133,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         # Create list of sensors with readable names (network sensors only)
         sensors = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) == PROTOCOL_ZHA:
-                continue  # ZHA devices are removed via remove_zha_device
+            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER):
+                continue  # ZHA/Matter devices are removed via their own steps
             device_name = target.get("device_name", target[CONF_HOST])
             if target[CONF_PROTOCOL] in [PROTOCOL_TCP, PROTOCOL_UDP]:
                 sensor_name = f"{device_name} - {target[CONF_PROTOCOL]} {target[CONF_PORT]}"

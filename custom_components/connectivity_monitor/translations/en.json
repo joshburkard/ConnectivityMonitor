@@ -73,13 +73,35 @@
                     "alert_action": "Alert Action (automation or script)",
                     "alert_action_delay": "Action Delay (minutes)"
                 }
+            },
+            "matter_device": {
+                "title": "Add Matter Device",
+                "description": "Select a Matter device registered in Home Assistant to monitor",
+                "data": {
+                    "matter_node_id": "Matter Device"
+                }
+            },
+            "matter_configure": {
+                "title": "Configure Matter Device",
+                "description": "Set a friendly name and alert settings for **{device_name}** ({node_id})",
+                "data": {
+                    "device_name": "Device Name (optional)",
+                    "alerts_enabled": "Enable Alerts",
+                    "alert_group": "Alert Group",
+                    "alert_delay": "Alert Delay (minutes)",
+                    "alert_action_enabled": "Enable Alert Action",
+                    "alert_action": "Alert Action (automation or script)",
+                    "alert_action_delay": "Action Delay (minutes)"
+                }
             }
         },
         "error": {
             "unknown": "Unexpected error occurred. Please check Home Assistant logs.",
             "invalid_dns_server": "Invalid DNS server IP address",
             "no_zha_devices": "No ZigBee devices found. Make sure ZHA is configured and has discovered devices.",
-            "all_zha_devices_added": "All discovered ZigBee devices are already being monitored."
+            "all_zha_devices_added": "All discovered ZigBee devices are already being monitored.",
+            "no_matter_devices": "No Matter devices found. Make sure the Matter integration is configured and has commissioned devices.",
+            "all_matter_devices_added": "All commissioned Matter devices are already being monitored."
         },
         "abort": {
             "device_added": "Device has been added successfully",
@@ -105,6 +127,13 @@
             "zha_menu": {
                 "title": "ZigBee (ZHA) Device",
                 "description": "Choose an action for your ZigBee device",
+                "data": {
+                    "action": "Action"
+                }
+            },
+            "matter_menu": {
+                "title": "Matter Device",
+                "description": "Choose an action for your Matter device",
                 "data": {
                     "action": "Action"
                 }
@@ -171,6 +200,13 @@
                     "ieee": "ZigBee Device"
                 }
             },
+            "remove_matter_device": {
+                "title": "Remove Matter Device",
+                "description": "Select the Matter device to stop monitoring",
+                "data": {
+                    "node_id": "Matter Device"
+                }
+            },
             "zha_alert_select": {
                 "title": "Modify ZigBee Alert Settings",
                 "description": "Select the ZigBee device to configure alerts for",
@@ -203,6 +239,25 @@
                 "data": {
                     "inactive_timeout": "Inactivity Timeout (minutes)"
                 }
+            },
+            "matter_alert_select": {
+                "title": "Modify Matter Alert Settings",
+                "description": "Select the Matter device to configure alerts for",
+                "data": {
+                    "node_id": "Matter Device"
+                }
+            },
+            "matter_alert_config": {
+                "title": "Matter Alert Configuration",
+                "description": "Configure alert settings for the selected Matter device",
+                "data": {
+                    "alerts_enabled": "Enable Alerts",
+                    "alert_group": "Alert Group",
+                    "alert_delay": "Alert Delay (minutes)",
+                    "alert_action_enabled": "Enable Alert Action",
+                    "alert_action": "Alert Action (automation or script)",
+                    "alert_action_delay": "Action Delay (minutes)"
+                }
             }
         },
         "error": {
@@ -210,7 +265,9 @@
             "invalid_dns_server": "Invalid DNS server IP address",
             "invalid_host": "Host cannot be empty",
             "no_zha_devices": "No ZigBee devices found. Make sure ZHA is configured and has discovered devices.",
-            "all_zha_devices_added": "All discovered ZigBee devices are already being monitored."
+            "all_zha_devices_added": "All discovered ZigBee devices are already being monitored.",
+            "no_matter_devices": "No Matter devices found. Make sure the Matter integration is configured and has commissioned devices.",
+            "all_matter_devices_added": "All commissioned Matter devices are already being monitored."
         }
     }
 }

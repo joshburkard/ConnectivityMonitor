@@ -55,9 +55,11 @@ from .const import (
     PROTOCOL_TCP,
     PROTOCOL_UDP,
     PROTOCOL_ZHA,
+    PROTOCOL_MATTER,
     CONF_ZHA_IEEE,
     CONF_INACTIVE_TIMEOUT,
     DEFAULT_INACTIVE_TIMEOUT,
+    CONF_MATTER_NODE_ID,
     DEFAULT_PING_TIMEOUT,
     DEFAULT_DNS_SERVER,
     DEFAULT_INTERVAL,
@@ -84,8 +86,9 @@ async def async_setup_entry(
     _LOGGER.debug("Targets to process: %s", targets)
 
     # Separate ZHA targets from regular network targets
-    network_targets = [t for t in targets if t.get(CONF_PROTOCOL) != PROTOCOL_ZHA]
+    network_targets = [t for t in targets if t.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER)]
     zha_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
+    matter_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER]
 
     # Create alert handler
     alert_handler = AlertHandler(hass)
@@ -191,6 +194,20 @@ async def async_setup_entry(
         except Exception as err:
             _LOGGER.exception("Error creating ZHA sensor for target %s: %s", target, err)
 
+    # Process Matter device targets
+    for target in matter_targets:
+        try:
+            coordinator = MatterCoordinator(hass, target, update_interval)
+            await coordinator.async_config_entry_first_refresh()
+            sensor = MatterSensor(coordinator, target)
+            entities.append(sensor)
+            new_unique_ids.add(sensor.unique_id)
+            _LOGGER.debug("Created Matter sensor: entity_id=%s, unique_id=%s",
+                         sensor.entity_id, sensor.unique_id)
+            sensor._alert_handler = alert_handler
+        except Exception as err:
+            _LOGGER.exception("Error creating Matter sensor for target %s: %s", target, err)
+
     # Remove old entities
     for entity in existing_entities:
         if entity.unique_id not in new_unique_ids:
@@ -259,13 +276,19 @@ class AlertHandler:
             if eid in self._last_disconnected:
                 continue
             is_zha_chk = tgt.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-            problem_states_chk = ["Inactive"] if is_zha_chk else ["Disconnected", "Not Connected", "Partially Connected"]
+            is_inactive_chk = tgt.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER)
+            problem_states_chk = ["Inactive"] if is_inactive_chk else ["Disconnected", "Not Connected", "Partially Connected"]
             cur_state = self.hass.states.get(eid)
             if cur_state and cur_state.state in problem_states_chk:
                 self._last_disconnected[eid] = current_time
                 self._notified[eid] = self._notified.get(eid, False)
                 self._action_fired[eid] = self._action_fired.get(eid, False)
-                ident = tgt.get(CONF_ZHA_IEEE, tgt.get(CONF_HOST, eid)) if is_zha_chk else tgt.get(CONF_HOST, eid)
+                if tgt.get(CONF_PROTOCOL) == PROTOCOL_MATTER:
+                    ident = tgt.get(CONF_MATTER_NODE_ID, tgt.get(CONF_HOST, eid))
+                elif is_zha_chk:
+                    ident = tgt.get(CONF_ZHA_IEEE, tgt.get(CONF_HOST, eid))
+                else:
+                    ident = tgt.get(CONF_HOST, eid)
                 _LOGGER.info(
                     "Connectivity Monitor: safety-net — detected %s already in state '%s', started tracking",
                     tgt.get("device_name", ident),
@@ -278,9 +301,15 @@ class AlertHandler:
 
             target = self._targets[entity_id]
             is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-            problem_states = ["Inactive"] if is_zha else ["Disconnected", "Not Connected", "Partially Connected"]
-            recovery_state = "Active" if is_zha else "Connected"
-            identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST]) if is_zha else target[CONF_HOST]
+            is_inactive = target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER)
+            problem_states = ["Inactive"] if is_inactive else ["Disconnected", "Not Connected", "Partially Connected"]
+            recovery_state = "Active" if is_inactive else "Connected"
+            if target.get(CONF_PROTOCOL) == PROTOCOL_MATTER:
+                identifier = target.get(CONF_MATTER_NODE_ID, target[CONF_HOST])
+            elif is_zha:
+                identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST])
+            else:
+                identifier = target[CONF_HOST]
             device_name = target.get("device_name", identifier)
             elapsed_minutes = (current_time - disconnect_time).total_seconds() / 60
 
@@ -305,7 +334,7 @@ class AlertHandler:
                         )
                         cur_alert_group = target.get(CONF_ALERT_GROUP)
                         cur_alert_action = target.get(CONF_ALERT_ACTION)
-                        recover_label = "active again" if is_zha else "connected"
+                        recover_label = "active again" if is_inactive else "connected"
                         if self._notified.get(entity_id) and cur_alert_group:
                             message = f"✅ Device {device_name} ({identifier}) has recovered and is now {recover_label}"
                             await self._async_send_notification(cur_alert_group, message)
@@ -343,7 +372,7 @@ class AlertHandler:
             if not state or state.state not in problem_states:
                 continue
 
-            state_label = "inactive" if is_zha else state.state.lower()
+            state_label = "inactive" if is_inactive else state.state.lower()
 
             # Build context variables passed to automation/script triggers
             last_online = disconnect_time.strftime("%Y-%m-%d %H:%M:%S")
@@ -462,18 +491,16 @@ class AlertHandler:
 
             current_time = datetime.now()
             is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-            problem_states = ["Inactive"] if is_zha else ["Disconnected", "Not Connected", "Partially Connected"]
-            recovery_state = "Active" if is_zha else "Connected"
-            identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST]) if is_zha else target[CONF_HOST]
+            is_inactive = target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER)
+            problem_states = ["Inactive"] if is_inactive else ["Disconnected", "Not Connected", "Partially Connected"]
+            recovery_state = "Active" if is_inactive else "Connected"
+            if target.get(CONF_PROTOCOL) == PROTOCOL_MATTER:
+                identifier = target.get(CONF_MATTER_NODE_ID, target[CONF_HOST])
+            elif is_zha:
+                identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST])
+            else:
+                identifier = target[CONF_HOST]
             device_name = target.get("device_name", identifier)
-
-            # Log state changes
-            _LOGGER.info(
-                "Connectivity Monitor: state change for %s: %s -> %s",
-                device_name,
-                old_state.state if old_state else "None",
-                new_state.state
-            )
 
             # Device has entered a problem state
             if new_state.state in problem_states:
@@ -1224,6 +1251,107 @@ class ZHASensor(CoordinatorEntity, SensorEntity):
         """Return the icon to use in the frontend."""
         if self.coordinator.data and self.coordinator.data.get("active"):
             return "mdi:zigbee"
+        return "mdi:lan-disconnect"
+
+    async def async_added_to_hass(self) -> None:
+        """Set up alerts after entity_id is finalised by HA registry."""
+        await super().async_added_to_hass()
+        alert_handler = getattr(self, "_alert_handler", None)
+        if alert_handler and (self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)):
+            await alert_handler.async_setup_alerts(self.entity_id, self.coordinator)
+
+
+class MatterCoordinator(DataUpdateCoordinator):
+    """Manages polling Matter device availability for a single Matter node."""
+
+    def __init__(self, hass: HomeAssistant, target: dict, update_interval: int) -> None:
+        """Initialize the Matter coordinator."""
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            update_interval=timedelta(seconds=update_interval),
+        )
+        self.target = target
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Check entity availability for the Matter device and compute active/inactive status."""
+        from .matter import async_get_matter_device_active
+
+        node_id = self.target[CONF_MATTER_NODE_ID]
+
+        active = await async_get_matter_device_active(self.hass, node_id)
+
+        return {
+            "active": bool(active),
+            "device_found": active is not None,
+        }
+
+
+class MatterSensor(CoordinatorEntity, SensorEntity):
+    """Sensor for a Matter device activity status based on entity availability."""
+
+    def __init__(self, coordinator: MatterCoordinator, target: dict) -> None:
+        """Initialize the Matter sensor."""
+        super().__init__(coordinator)
+        self.target = target
+        self._attr_has_entity_name = True
+        self._attr_available = True
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+        device_name = target.get("device_name", target[CONF_MATTER_NODE_ID])
+        safe_name = (
+            device_name.lower()
+            .replace(" ", "_")
+            .replace("-", "_")
+            .replace(".", "_")
+            .replace(":", "_")
+        )
+
+        self._attr_name = "Matter Status"
+        self.entity_id = f"sensor.connectivity_monitor_matter_{safe_name}"
+
+        # Unique ID scoped to this integration
+        node_id_clean = target[CONF_MATTER_NODE_ID].replace("-", "_").replace(":", "_")
+        self._attr_unique_id = f"connectivity_matter_{node_id_clean}"
+
+        # Merge onto the existing Matter device by using the Matter domain identifier.
+        # EntityCategory.DIAGNOSTIC places it in the Diagnostics card on the device page.
+        self._attr_device_info = DeviceInfo(
+            identifiers={("matter", target[CONF_MATTER_NODE_ID])},
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return Active / Inactive / Unknown."""
+        if not self.coordinator.data:
+            return "Unknown"
+        if not self.coordinator.data.get("device_found"):
+            return "Unknown"
+        return "Active" if self.coordinator.data.get("active") else "Inactive"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes used by the panel."""
+        node_id = self.target[CONF_MATTER_NODE_ID]
+        attrs = {
+            "node_id": node_id,
+            "device_name": self.target.get("device_name", node_id),
+            "monitor_type": "matter",
+        }
+        if self.target.get(CONF_ALERT_GROUP):
+            attrs["alert_group"] = self.target[CONF_ALERT_GROUP]
+            attrs["alert_delay"] = self.target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+        if self.target.get(CONF_ALERT_ACTION):
+            attrs["alert_action"] = self.target[CONF_ALERT_ACTION]
+            attrs["alert_action_delay"] = self.target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+        return attrs
+
+    @property
+    def icon(self) -> str:
+        """Return the icon to use in the frontend."""
+        if self.coordinator.data and self.coordinator.data.get("active"):
+            return "mdi:chip"
         return "mdi:lan-disconnect"
 
     async def async_added_to_hass(self) -> None:
