@@ -1,5 +1,13 @@
 # Automation Example
 
+You can trigger an Automation on status change of the Overall sensor of a device. The Overall sensor can have this statuses:
+
+- Connected
+- Partially Connected
+- Disconnected
+
+To trigger automations, you have to create a Automation like this:
+
 ```yaml
 automation:
   alias: "Connectivity Monitor - Device Alert"
@@ -8,9 +16,9 @@ automation:
   trigger:
     - platform: event
       event_type: connectivity_monitor_alert
-      # Optional: only react when this automation is the chosen action target:
-      # event_data:
-      #   action_entity_id: automation.connectivity_monitor_device_alert
+  condition:
+    - condition: template
+      value_template: "{{ trigger.event.data.action_entity_id == this.entity_id }}"
   action:
     - choose:
         - conditions:
