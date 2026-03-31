@@ -268,6 +268,9 @@
             "all_zha_devices_added": "All discovered ZigBee devices are already being monitored.",
             "no_matter_devices": "No Matter devices found. Make sure the Matter integration is configured and has commissioned devices.",
             "all_matter_devices_added": "All commissioned Matter devices are already being monitored."
+        },
+        "abort": {
+            "cleanup_done": "Orphaned device cleanup completed."
         }
     }
 }

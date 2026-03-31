@@ -395,7 +395,7 @@
         ? "<span class=\"sensor-latency\">action: " + esc(device.alertAction.split(".").slice(1).join(".") || device.alertAction) + " (" + esc(device.alertActionDelay) + " min)</span>"
         : "";
 
-      return "<div class=\"device-card card-" + meta.css + "\">" + +
+      return "<div class=\"device-card card-" + meta.css + "\">" +
         "<div class=\"device-header\">" +
           "<button class=\"toggle-btn\" data-toggle=\"" + esc(toggle) + "\" title=\"" + (collapsed ? "Expand" : "Collapse") + "\">" + chevron + "</button>" +
           "<div class=\"device-info clickable\" " + deviceAttr + ">" +

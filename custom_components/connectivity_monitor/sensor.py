@@ -32,6 +32,7 @@ from homeassistant.helpers.update_coordinator import (
 from homeassistant.helpers.entity_registry import (
     async_entries_for_config_entry,
     async_get as async_get_entity_registry,
+    async_entries_for_device,
 )
 from homeassistant.helpers.device_registry import async_get as async_get_device_registry
 
@@ -213,6 +214,31 @@ async def async_setup_entry(
         if entity.unique_id not in new_unique_ids:
             _LOGGER.debug("Removing old entity: %s (unique_id: %s)", entity.entity_id, entity.unique_id)
             entity_registry.async_remove(entity.entity_id)
+
+    # Remove orphaned devices — any device that references this config entry
+    # but has no remaining entities belonging to it. This covers both our own
+    # DOMAIN devices (network monitors) and shared devices (ZHA/Matter) where
+    # our diagnostic sensor was removed but the config-entry link was not.
+    device_registry = async_get_device_registry(hass)
+    for device_entry in list(device_registry.devices.values()):
+        if entry.entry_id not in device_entry.config_entries:
+            continue
+        entry_entity_ids = {
+            e.entity_id
+            for e in async_entries_for_device(entity_registry, device_entry.id)
+            if e.config_entry_id == entry.entry_id
+        }
+        if not entry_entity_ids:
+            _LOGGER.debug("Removing orphaned device: %s (%s)", device_entry.name, device_entry.id)
+            if device_entry.config_entries == {entry.entry_id}:
+                # Only our integration owns this device — safe to delete entirely.
+                device_registry.async_remove_device(device_entry.id)
+            else:
+                # Device is shared with another integration (e.g. ZHA/Matter).
+                # Only remove our association so the device remains intact.
+                device_registry.async_update_device(
+                    device_entry.id, remove_config_entry_id=entry.entry_id
+                )
 
     _LOGGER.debug("Final entities to be added: %s",
                  [{"entity_id": e.entity_id, "unique_id": e.unique_id} for e in entities])

@@ -603,6 +603,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_matter_menu()
             elif category == "settings":
                 return await self.async_step_settings()
+            elif category == "cleanup":
+                return await self.async_step_cleanup_orphans()
 
         has_network = any(t.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER) for t in self._targets)
         has_zha = any(t.get(CONF_PROTOCOL) == PROTOCOL_ZHA for t in self._targets)
@@ -616,6 +618,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         if has_matter:
             categories["matter"] = "Matter Device"
         categories["settings"] = "General Settings"
+        categories["cleanup"] = "Clean up Orphaned Devices"
 
         return self.async_show_form(
             step_id="menu",
@@ -867,29 +870,16 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 errors[CONF_HOST] = "invalid_host"
             else:
                 old_host = self._selected_device
-                entity_registry = async_get_entity_registry(self.hass)
                 device_registry = async_get_device_registry(self.hass)
-                entry_entities = async_entries_for_config_entry(
-                    entity_registry, self.config_entry.entry_id
-                )
 
-                # Find device_ids for the old host via entity state attributes.
-                # Each sensor stores "host" in its attributes, so this works
-                # regardless of whether the device is keyed by MAC or by host.
+                # Locate device entries via hw_version, which is always set to
+                # target[CONF_HOST] in DeviceInfo — works regardless of whether
+                # the identifier uses a MAC or the host string.
                 old_device_ids = set()
-                for entity_entry in entry_entities:
-                    state = self.hass.states.get(entity_entry.entity_id)
-                    if state and state.attributes.get("host") == old_host:
-                        if entity_entry.device_id:
-                            old_device_ids.add(entity_entry.device_id)
-
-                # Fallback: identifier-based lookup for devices that were never polled
-                if not old_device_ids:
-                    for device_entry in device_registry.devices.values():
-                        for identifier in device_entry.identifiers:
-                            if identifier[0] == DOMAIN and identifier[1] == old_host:
-                                old_device_ids.add(device_entry.id)
-                                break
+                for device_entry in device_registry.devices.values():
+                    if (device_entry.hw_version == old_host and
+                            any(i[0] == DOMAIN for i in device_entry.identifiers)):
+                        old_device_ids.add(device_entry.id)
 
                 # Update all targets that belong to the old host
                 for target in self._targets:
@@ -1045,23 +1035,20 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # Remove all targets for this device
             self._targets = [t for t in self._targets if t[CONF_HOST] != device_host]
 
-            # Find and remove all entities for this device
-            entry_entities = async_entries_for_config_entry(entity_registry, self.config_entry.entry_id)
-            for entity_entry in entry_entities:
-                # Check if entity belongs to this device
-                if entity_entry.unique_id.startswith(f"{device_host}_"):
-                    entity_registry.async_remove(entity_entry.entity_id)
-
-            # Find and remove the device
-            device_id = None
+            # Locate device entries via hw_version, which is always set to
+            # target[CONF_HOST] in DeviceInfo for every network device — this
+            # works regardless of whether the identifier uses a MAC or the host.
+            device_ids = set()
             for device_entry in device_registry.devices.values():
-                for identifier in device_entry.identifiers:
-                    if identifier[0] == DOMAIN and identifier[1] == device_host:
-                        device_id = device_entry.id
-                        break
-                if device_id:
-                    device_registry.async_remove_device(device_id)
-                    break
+                if (device_entry.hw_version == device_host and
+                        any(i[0] == DOMAIN for i in device_entry.identifiers)):
+                    device_ids.add(device_entry.id)
+
+            # Remove devices — HA automatically removes their associated entities
+            # from the entity registry; any remaining stale entities are cleaned up
+            # during the reload triggered below.
+            for device_id in device_ids:
+                device_registry.async_remove_device(device_id)
 
             # Update config entry
             self.config_data[CONF_TARGETS] = self._targets
@@ -1435,4 +1422,43 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="settings",
             data_schema=vol.Schema(schema)
+        )
+
+    async def async_step_cleanup_orphans(self, user_input=None):
+        """Remove devices registered under this integration that have no entities."""
+        from homeassistant.helpers.entity_registry import (
+            async_entries_for_device,
+            async_get as async_get_er,
+        )
+
+        entity_registry = async_get_er(self.hass)
+        device_registry = async_get_device_registry(self.hass)
+        entry_id = self.config_entry.entry_id
+
+        removed = []
+        for device_entry in list(device_registry.devices.values()):
+            # Only consider devices that list our config entry
+            if entry_id not in device_entry.config_entries:
+                continue
+            # Check whether any entity still belongs to our config entry
+            entry_entities = [
+                e for e in async_entries_for_device(entity_registry, device_entry.id)
+                if e.config_entry_id == entry_id
+            ]
+            if not entry_entities:
+                removed.append(device_entry.name or device_entry.id)
+                if device_entry.config_entries == {entry_id}:
+                    # Exclusively ours — delete the device entirely
+                    device_registry.async_remove_device(device_entry.id)
+                else:
+                    # Shared with another integration — only remove our association
+                    device_registry.async_update_device(
+                        device_entry.id, remove_config_entry_id=entry_id
+                    )
+
+        if removed:
+            _LOGGER.info("Connectivity Monitor: cleaned up orphaned devices: %s", removed)
+
+        return self.async_abort(
+            reason="cleanup_done"
         )

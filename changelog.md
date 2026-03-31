@@ -2,6 +2,8 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00040 | 31/03/2026 | Clean up orphaned devices |
+| 0.1.00039 | 31/03/2026 | fixed issue with ZigBee tab in the sidebar panel |
 | 0.1.00038 | 31/03/2026 | added Matter devices to the sidebar panel |
 | 0.1.00037 | 31/03/2026 | adding support for Matter devices |
 | 0.1.00036 | 31/03/2026 | changed structure of Config Flow |
