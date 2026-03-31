@@ -32,6 +32,15 @@
     Unknown:  { label: "Unknown",  css: "unknown", icon: "?" },
   };
 
+  // ── Matter tab constants ──────────────────────────────────────────────────────
+  const MATTER_STATUS_ORDER = { Inactive: 0, Unknown: 1, Active: 2 };
+
+  const MATTER_STATUS_META = {
+    Active:   { label: "Active",   css: "ok",      icon: "\u2713" },
+    Inactive: { label: "Inactive", css: "error",   icon: "\u2717" },
+    Unknown:  { label: "Unknown",  css: "unknown", icon: "?" },
+  };
+
   // ── Panel component ──────────────────────────────────────────────────────────
   class ConnectivityMonitorPanel extends HTMLElement {
     constructor() {
@@ -116,6 +125,7 @@
       for (const [entityId, state] of Object.entries(states)) {
         if (!entityId.startsWith("sensor.connectivity_monitor_") || !entityId.endsWith("_overall")) continue;
         if (state.attributes.monitor_type === "zha") continue;
+        if (state.attributes.monitor_type === "matter") continue;
 
         const host            = state.attributes.host || "";
         const deviceName      = state.attributes.device_name || host;
@@ -127,7 +137,8 @@
           return id.startsWith("sensor.connectivity_monitor_") &&
             !id.endsWith("_overall") && !id.endsWith("_ad") &&
             s.attributes.host === host &&
-            s.attributes.monitor_type !== "zha";
+            s.attributes.monitor_type !== "zha" &&
+            s.attributes.monitor_type !== "matter";
         });
 
         sensors.sort((a, b) => {
@@ -195,8 +206,45 @@
       return { groups, totalDevices: devices.length };
     }
 
+    // ── Matter data ────────────────────────────────────────────────────────────
+    _getMatterData() {
+      if (!this._hass) return { groups: [], totalDevices: 0 };
+      const states = this._hass.states;
+      const devices = [];
+
+      for (const [entityId, state] of Object.entries(states)) {
+        if (!entityId.startsWith("sensor.connectivity_monitor_")) continue;
+        if (state.attributes.monitor_type !== "matter") continue;
+
+        const nodeId     = state.attributes.node_id || "";
+        const deviceName = state.attributes.device_name || nodeId;
+        const status     = state.state || "Unknown";
+        const alertGroup = state.attributes.alert_group || null;
+        const alertDelay = state.attributes.alert_delay != null ? state.attributes.alert_delay : null;
+        const alertAction = state.attributes.alert_action || null;
+        const alertActionDelay = state.attributes.alert_action_delay != null ? state.attributes.alert_action_delay : null;
+
+        devices.push({ entityId, nodeId, deviceName, status, alertGroup, alertDelay, alertAction, alertActionDelay });
+      }
+
+      const groupMap = {};
+      for (const device of devices) {
+        if (!groupMap[device.status]) groupMap[device.status] = [];
+        groupMap[device.status].push(device);
+      }
+
+      const groups = Object.entries(groupMap)
+        .sort(([a], [b]) => (MATTER_STATUS_ORDER[a] ?? 99) - (MATTER_STATUS_ORDER[b] ?? 99))
+        .map(([status, devs]) => ({
+          status,
+          devices: devs.sort((a, b) => a.deviceName.localeCompare(b.deviceName)),
+        }));
+
+      return { groups, totalDevices: devices.length };
+    }
+
     // ── Collapse management ────────────────────────────────────────────────────
-    _initCollapsed(networkGroups, zhaGroups) {
+    _initCollapsed(networkGroups, zhaGroups, matterGroups) {
       if (this._collapsed !== null) return;
       this._collapsed = new Set();
       for (const group of networkGroups) {
@@ -207,6 +255,13 @@
         }
       }
       for (const group of zhaGroups) {
+        if (group.status === "Active") {
+          for (const device of group.devices) {
+            this._collapsed.add(device.entityId);
+          }
+        }
+      }
+      for (const group of matterGroups) {
         if (group.status === "Active") {
           for (const device of group.devices) {
             this._collapsed.add(device.entityId);
@@ -376,24 +431,88 @@
         "</div>";
     }
 
+    // ── Matter tab renderers ───────────────────────────────────────────────────
+    _renderMatterDevice(device) {
+      const meta      = MATTER_STATUS_META[device.status] || MATTER_STATUS_META.Unknown;
+      const toggle    = device.entityId;
+      const collapsed = this._collapsed.has(toggle);
+      const chevron   = collapsed ? "\u25b6" : "\u25bc";
+
+      let deviceAttr = "data-entity=\"" + esc(device.entityId) + "\"";
+      if (this._hass && this._hass.entities) {
+        const entry = this._hass.entities[device.entityId];
+        if (entry && entry.device_id) {
+          deviceAttr = "data-device=\"" + esc(entry.device_id) + "\"";
+        }
+      }
+
+      const badgeCss  = meta.css === "ok" ? "badge-ok" : "badge-error";
+      const alertHtml = device.alertGroup
+        ? "<span class=\"sensor-latency\">alert: " + esc(device.alertGroup) + " (" + esc(device.alertDelay) + " min)</span>"
+        : "";
+      const actionHtml = device.alertAction
+        ? "<span class=\"sensor-latency\">action: " + esc(device.alertAction.split(".").slice(1).join(".") || device.alertAction) + " (" + esc(device.alertActionDelay) + " min)</span>"
+        : "";
+
+      return "<div class=\"device-card card-" + meta.css + "\">" +
+        "<div class=\"device-header\">" +
+          "<button class=\"toggle-btn\" data-toggle=\"" + esc(toggle) + "\" title=\"" + (collapsed ? "Expand" : "Collapse") + "\">" + chevron + "</button>" +
+          "<div class=\"device-info clickable\" " + deviceAttr + ">" +
+            "<div class=\"device-name\">" + esc(device.deviceName) + "</div>" +
+            "<div class=\"device-host\">" + esc(device.nodeId) + "</div>" +
+          "</div>" +
+          "<span class=\"device-badge " + badgeCss + "\">" + esc(device.status) + "</span>" +
+        "</div>" +
+        "<div class=\"sensor-list\">" +
+          "<div class=\"sensor-row clickable\" data-entity=\"" + esc(device.entityId) + "\">" +
+            "<span class=\"sensor-dot dot-" + meta.css + "\"></span>" +
+            "<span class=\"sensor-proto\">Matter Status</span>" +
+            "<span class=\"sensor-state label-" + meta.css + "\">" + esc(device.status) + "</span>" +
+            alertHtml +
+            actionHtml +
+            "<span class=\"row-arrow\">\u203a</span>" +
+          "</div>" +
+        "</div>" +
+        "</div>";
+    }
+
+    _renderMatterGroup(group) {
+      const meta    = MATTER_STATUS_META[group.status] || MATTER_STATUS_META.Unknown;
+      const devHtml = group.devices.map((d) => this._renderMatterDevice(d)).join("");
+      return "<div class=\"group\">" +
+        "<div class=\"group-header group-header-" + meta.css + "\">" +
+          "<span class=\"group-icon\">" + meta.icon + "</span>" +
+          "<span class=\"group-label\">" + esc(meta.label) + "</span>" +
+          "<span class=\"group-count\">" + esc(group.devices.length) + "</span>" +
+        "</div>" +
+        devHtml +
+        "</div>";
+    }
+
     // ── Main render ────────────────────────────────────────────────────────────
     _render() {
       if (!this.shadowRoot) return;
       try {
         const { groups: networkGroups, totalDevices: totalNetwork } = this._getDeviceData();
         const { groups: zhaGroups,     totalDevices: totalZha     } = this._getZhaData();
-        const totalDevices = totalNetwork + totalZha;
+        const { groups: matterGroups,  totalDevices: totalMatter  } = this._getMatterData();
+        const totalDevices = totalNetwork + totalZha + totalMatter;
 
-        this._initCollapsed(networkGroups, zhaGroups);
+        this._initCollapsed(networkGroups, zhaGroups, matterGroups);
 
         const networkActive = this._activeTab === "network";
+        const zhaActive     = this._activeTab === "zha";
+        const matterActive  = this._activeTab === "matter";
         const tabBarHtml =
           "<div class=\"tab-bar\">" +
             "<button class=\"tab-btn" + (networkActive ? " tab-active" : "") + "\" data-tab=\"network\">" +
               "Network" + (totalNetwork > 0 ? " (" + esc(totalNetwork) + ")" : "") +
             "</button>" +
-            "<button class=\"tab-btn" + (!networkActive ? " tab-active" : "") + "\" data-tab=\"zha\">" +
+            "<button class=\"tab-btn" + (zhaActive ? " tab-active" : "") + "\" data-tab=\"zha\">" +
               "\u26a1 ZigBee" + (totalZha > 0 ? " (" + esc(totalZha) + ")" : "") +
+            "</button>" +
+            "<button class=\"tab-btn" + (matterActive ? " tab-active" : "") + "\" data-tab=\"matter\">" +
+              "\u25c6 Matter" + (totalMatter > 0 ? " (" + esc(totalMatter) + ")" : "") +
             "</button>" +
           "</div>";
 
@@ -402,10 +521,14 @@
           tabContentHtml = totalNetwork === 0
             ? "<div class=\"no-devices\">No network devices are being monitored yet.<br>Use <em>Configure</em> to add a device.</div>"
             : networkGroups.map((g) => this._renderGroup(g)).join("");
-        } else {
+        } else if (zhaActive) {
           tabContentHtml = totalZha === 0
             ? "<div class=\"no-devices\">No ZigBee devices are being monitored yet.<br>Use <em>Configure \u2192 Add ZigBee Device (ZHA)</em> to get started.</div>"
             : zhaGroups.map((g) => this._renderZhaGroup(g)).join("");
+        } else {
+          tabContentHtml = totalMatter === 0
+            ? "<div class=\"no-devices\">No Matter devices are being monitored yet.<br>Use <em>Configure \u2192 Add Matter Device</em> to get started.</div>"
+            : matterGroups.map((g) => this._renderMatterGroup(g)).join("");
         }
 
         const container = this.shadowRoot.querySelector("#cm-root");

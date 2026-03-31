@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00038 | 31/03/2026 | added Matter devices to the sidebar panel |
 | 0.1.00037 | 31/03/2026 | adding support for Matter devices |
 | 0.1.00036 | 31/03/2026 | changed structure of Config Flow |
 | 0.1.00035 | 30/03/2026 | fixing issue with ICMP sensor |
