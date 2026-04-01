@@ -38,6 +38,26 @@
                     "device_type": "Device Type"
                 }
             },
+            "esphome_device": {
+                "title": "Add ESPHome Device",
+                "description": "Select an ESPHome device registered in Home Assistant to monitor",
+                "data": {
+                    "esphome_device_id": "ESPHome Device"
+                }
+            },
+            "esphome_configure": {
+                "title": "Configure ESPHome Device",
+                "description": "Set a friendly name and alert settings for **{device_name}** ({device_id})",
+                "data": {
+                    "device_name": "Device Name (optional)",
+                    "alerts_enabled": "Enable Alerts",
+                    "alert_group": "Alert Group",
+                    "alert_delay": "Alert Delay (minutes)",
+                    "alert_action_enabled": "Enable Alert Action",
+                    "alert_action": "Alert Action (automation or script)",
+                    "alert_action_delay": "Action Delay (minutes)"
+                }
+            },
             "network": {
                 "title": "Add Network Device",
                 "description": "Configure a network device to monitor",
@@ -101,7 +121,9 @@
             "no_zha_devices": "No ZigBee devices found. Make sure ZHA is configured and has discovered devices.",
             "all_zha_devices_added": "All discovered ZigBee devices are already being monitored.",
             "no_matter_devices": "No Matter devices found. Make sure the Matter integration is configured and has commissioned devices.",
-            "all_matter_devices_added": "All commissioned Matter devices are already being monitored."
+            "all_matter_devices_added": "All commissioned Matter devices are already being monitored.",
+            "no_esphome_devices": "No ESPHome devices found. Make sure the ESPHome integration is configured and has devices.",
+            "all_esphome_devices_added": "All ESPHome devices are already being monitored."
         },
         "abort": {
             "device_added": "Device has been added successfully",
@@ -207,6 +229,39 @@
                     "node_id": "Matter Device"
                 }
             },
+            "esphome_menu": {
+                "title": "ESPHome Device",
+                "description": "Choose an action for your ESPHome device",
+                "data": {
+                    "action": "Action"
+                }
+            },
+            "esphome_alert_select": {
+                "title": "Modify ESPHome Alert Settings",
+                "description": "Select the ESPHome device to configure alerts for",
+                "data": {
+                    "device_id": "ESPHome Device"
+                }
+            },
+            "esphome_alert_config": {
+                "title": "ESPHome Alert Configuration",
+                "description": "Configure alert settings for the selected ESPHome device",
+                "data": {
+                    "alerts_enabled": "Enable Alerts",
+                    "alert_group": "Alert Group",
+                    "alert_delay": "Alert Delay (minutes)",
+                    "alert_action_enabled": "Enable Alert Action",
+                    "alert_action": "Alert Action (automation or script)",
+                    "alert_action_delay": "Action Delay (minutes)"
+                }
+            },
+            "remove_esphome_device": {
+                "title": "Remove ESPHome Device",
+                "description": "Select the ESPHome device to stop monitoring",
+                "data": {
+                    "device_id": "ESPHome Device"
+                }
+            },
             "zha_alert_select": {
                 "title": "Modify ZigBee Alert Settings",
                 "description": "Select the ZigBee device to configure alerts for",
@@ -267,7 +322,9 @@
             "no_zha_devices": "No ZigBee devices found. Make sure ZHA is configured and has discovered devices.",
             "all_zha_devices_added": "All discovered ZigBee devices are already being monitored.",
             "no_matter_devices": "No Matter devices found. Make sure the Matter integration is configured and has commissioned devices.",
-            "all_matter_devices_added": "All commissioned Matter devices are already being monitored."
+            "all_matter_devices_added": "All commissioned Matter devices are already being monitored.",
+            "no_esphome_devices": "No ESPHome devices found. Make sure the ESPHome integration is configured and has devices.",
+            "all_esphome_devices_added": "All ESPHome devices are already being monitored."
         },
         "abort": {
             "cleanup_done": "Orphaned device cleanup completed."

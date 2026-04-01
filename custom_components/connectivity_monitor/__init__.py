@@ -13,7 +13,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import (
     DOMAIN, CONF_TARGETS, CONF_INTERVAL, CONF_DNS_SERVER,
-    PROTOCOL_ZHA, PROTOCOL_MATTER, DEFAULT_INTERVAL, DEFAULT_DNS_SERVER,
+    PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, DEFAULT_INTERVAL, DEFAULT_DNS_SERVER,
 )
 
 _LOGGER = logging.getLogger(__name__)

@@ -15,8 +15,9 @@ This integration allows to monitor devices and create Alert Notification and Ale
     - ICMP
     - Active Directory Domain Controller
     - supports targets with IP-Address or FQDN
-  - ZigBee (ZHA)
+  - ESPHome / ESP32 devices
   - Matter
+  - ZigBee (ZHA)
 - allows to add later more targets or remove them again
 - allows to use a custom DNS server to resolve FQDN
 

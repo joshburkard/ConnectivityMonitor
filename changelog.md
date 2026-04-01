@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00042 | 01/04/2026 | added support for monitoring ESPHome (ESP32) devices |
 | 0.1.00041 | 31/03/2026 | split integration entries into 3 categories: Network Monitor, ZigBee Monitor and Matter Monitor |
 | 0.1.00040 | 31/03/2026 | Clean up orphaned devices |
 | 0.1.00039 | 31/03/2026 | fixed issue with ZigBee tab in the sidebar panel |

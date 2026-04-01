@@ -40,7 +40,14 @@
     Inactive: { label: "Inactive", css: "error",   icon: "\u2717" },
     Unknown:  { label: "Unknown",  css: "unknown", icon: "?" },
   };
+  // ── ESPHome tab constants ─────────────────────────────────────────────────────
+  const ESPHOME_STATUS_ORDER = { Inactive: 0, Unknown: 1, Active: 2 };
 
+  const ESPHOME_STATUS_META = {
+    Active:   { label: "Active",   css: "ok",      icon: "✓" },
+    Inactive: { label: "Inactive", css: "error",   icon: "✗" },
+    Unknown:  { label: "Unknown",  css: "unknown", icon: "?" },
+  };
   // ── Panel component ──────────────────────────────────────────────────────────
   class ConnectivityMonitorPanel extends HTMLElement {
     constructor() {
@@ -126,6 +133,7 @@
         if (!entityId.startsWith("sensor.connectivity_monitor_") || !entityId.endsWith("_overall")) continue;
         if (state.attributes.monitor_type === "zha") continue;
         if (state.attributes.monitor_type === "matter") continue;
+        if (state.attributes.monitor_type === "esphome") continue;
 
         const host            = state.attributes.host || "";
         const deviceName      = state.attributes.device_name || host;
@@ -138,7 +146,8 @@
             !id.endsWith("_overall") && !id.endsWith("_ad") &&
             s.attributes.host === host &&
             s.attributes.monitor_type !== "zha" &&
-            s.attributes.monitor_type !== "matter";
+            s.attributes.monitor_type !== "matter" &&
+            s.attributes.monitor_type !== "esphome";
         });
 
         sensors.sort((a, b) => {
@@ -243,8 +252,45 @@
       return { groups, totalDevices: devices.length };
     }
 
+    // ── ESPHome data ────────────────────────────────────────────────────────────
+    _getEsphomeData() {
+      if (!this._hass) return { groups: [], totalDevices: 0 };
+      const states = this._hass.states;
+      const devices = [];
+
+      for (const [entityId, state] of Object.entries(states)) {
+        if (!entityId.startsWith("sensor.connectivity_monitor_")) continue;
+        if (state.attributes.monitor_type !== "esphome") continue;
+
+        const deviceId   = state.attributes.device_id || "";
+        const deviceName = state.attributes.device_name || deviceId;
+        const status     = state.state || "Unknown";
+        const alertGroup = state.attributes.alert_group || null;
+        const alertDelay = state.attributes.alert_delay != null ? state.attributes.alert_delay : null;
+        const alertAction = state.attributes.alert_action || null;
+        const alertActionDelay = state.attributes.alert_action_delay != null ? state.attributes.alert_action_delay : null;
+
+        devices.push({ entityId, deviceId, deviceName, status, alertGroup, alertDelay, alertAction, alertActionDelay });
+      }
+
+      const groupMap = {};
+      for (const device of devices) {
+        if (!groupMap[device.status]) groupMap[device.status] = [];
+        groupMap[device.status].push(device);
+      }
+
+      const groups = Object.entries(groupMap)
+        .sort(([a], [b]) => (ESPHOME_STATUS_ORDER[a] ?? 99) - (ESPHOME_STATUS_ORDER[b] ?? 99))
+        .map(([status, devs]) => ({
+          status,
+          devices: devs.sort((a, b) => a.deviceName.localeCompare(b.deviceName)),
+        }));
+
+      return { groups, totalDevices: devices.length };
+    }
+
     // ── Collapse management ────────────────────────────────────────────────────
-    _initCollapsed(networkGroups, zhaGroups, matterGroups) {
+    _initCollapsed(networkGroups, zhaGroups, matterGroups, esphomeGroups) {
       if (this._collapsed !== null) return;
       this._collapsed = new Set();
       for (const group of networkGroups) {
@@ -262,6 +308,13 @@
         }
       }
       for (const group of matterGroups) {
+        if (group.status === "Active") {
+          for (const device of group.devices) {
+            this._collapsed.add(device.entityId);
+          }
+        }
+      }
+      for (const group of esphomeGroups) {
         if (group.status === "Active") {
           for (const device of group.devices) {
             this._collapsed.add(device.entityId);
@@ -489,6 +542,64 @@
         "</div>";
     }
 
+    // ── ESPHome tab renderers ─────────────────────────────────────────────────
+    _renderEsphomeDevice(device) {
+      const meta      = ESPHOME_STATUS_META[device.status] || ESPHOME_STATUS_META.Unknown;
+      const toggle    = device.entityId;
+      const collapsed = this._collapsed.has(toggle);
+      const chevron   = collapsed ? "▶" : "▼";
+
+      let deviceAttr = "data-entity=\"" + esc(device.entityId) + "\"";
+      if (this._hass && this._hass.entities) {
+        const entry = this._hass.entities[device.entityId];
+        if (entry && entry.device_id) {
+          deviceAttr = "data-device=\"" + esc(entry.device_id) + "\"";
+        }
+      }
+
+      const badgeCss   = meta.css === "ok" ? "badge-ok" : "badge-error";
+      const alertHtml = device.alertGroup
+        ? "<span class=\"sensor-latency\">alert: " + esc(device.alertGroup) + " (" + esc(device.alertDelay) + " min)</span>"
+        : "";
+      const actionHtml = device.alertAction
+        ? "<span class=\"sensor-latency\">action: " + esc(device.alertAction.split(".").slice(1).join(".") || device.alertAction) + " (" + esc(device.alertActionDelay) + " min)</span>"
+        : "";
+
+      return "<div class=\"device-card card-" + meta.css + "\">" +
+        "<div class=\"device-header\">" +
+          "<button class=\"toggle-btn\" data-toggle=\"" + esc(toggle) + "\" title=\"" + (collapsed ? "Expand" : "Collapse") + "\">" + chevron + "</button>" +
+          "<div class=\"device-info clickable\" " + deviceAttr + ">" +
+            "<div class=\"device-name\">" + esc(device.deviceName) + "</div>" +
+            "<div class=\"device-host\">" + esc(device.deviceId) + "</div>" +
+          "</div>" +
+          "<span class=\"device-badge " + badgeCss + "\">" + esc(device.status) + "</span>" +
+        "</div>" +
+        "<div class=\"sensor-list\">" +
+          "<div class=\"sensor-row clickable\" data-entity=\"" + esc(device.entityId) + "\">" +
+            "<span class=\"sensor-dot dot-" + meta.css + "\"></span>" +
+            "<span class=\"sensor-proto\">ESPHome Status</span>" +
+            "<span class=\"sensor-state label-" + meta.css + "\">" + esc(device.status) + "</span>" +
+            alertHtml +
+            actionHtml +
+            "<span class=\"row-arrow\">›</span>" +
+          "</div>" +
+        "</div>" +
+        "</div>";
+    }
+
+    _renderEsphomeGroup(group) {
+      const meta    = ESPHOME_STATUS_META[group.status] || ESPHOME_STATUS_META.Unknown;
+      const devHtml = group.devices.map((d) => this._renderEsphomeDevice(d)).join("");
+      return "<div class=\"group\">" +
+        "<div class=\"group-header group-header-" + meta.css + "\">" +
+          "<span class=\"group-icon\">" + meta.icon + "</span>" +
+          "<span class=\"group-label\">" + esc(meta.label) + "</span>" +
+          "<span class=\"group-count\">" + esc(group.devices.length) + "</span>" +
+        "</div>" +
+        devHtml +
+        "</div>";
+    }
+
     // ── Main render ────────────────────────────────────────────────────────────
     _render() {
       if (!this.shadowRoot) return;
@@ -496,23 +607,28 @@
         const { groups: networkGroups, totalDevices: totalNetwork } = this._getDeviceData();
         const { groups: zhaGroups,     totalDevices: totalZha     } = this._getZhaData();
         const { groups: matterGroups,  totalDevices: totalMatter  } = this._getMatterData();
-        const totalDevices = totalNetwork + totalZha + totalMatter;
+        const { groups: esphomeGroups, totalDevices: totalEsphome } = this._getEsphomeData();
+        const totalDevices = totalNetwork + totalZha + totalMatter + totalEsphome;
 
-        this._initCollapsed(networkGroups, zhaGroups, matterGroups);
+        this._initCollapsed(networkGroups, zhaGroups, matterGroups, esphomeGroups);
 
         const networkActive = this._activeTab === "network";
         const zhaActive     = this._activeTab === "zha";
         const matterActive  = this._activeTab === "matter";
+        const esphomeActive = this._activeTab === "esphome";
         const tabBarHtml =
           "<div class=\"tab-bar\">" +
-            "<button class=\"tab-btn" + (networkActive ? " tab-active" : "") + "\" data-tab=\"network\">" +
-              "Network" + (totalNetwork > 0 ? " (" + esc(totalNetwork) + ")" : "") +
-            "</button>" +
-            "<button class=\"tab-btn" + (zhaActive ? " tab-active" : "") + "\" data-tab=\"zha\">" +
-              "\u26a1 ZigBee" + (totalZha > 0 ? " (" + esc(totalZha) + ")" : "") +
+            "<button class=\"tab-btn" + (esphomeActive ? " tab-active" : "") + "\" data-tab=\"esphome\">" +
+              "<ha-icon icon=\"mdi:chip\"></ha-icon> ESPHome" + (totalEsphome > 0 ? " (" + esc(totalEsphome) + ")" : "") +
             "</button>" +
             "<button class=\"tab-btn" + (matterActive ? " tab-active" : "") + "\" data-tab=\"matter\">" +
-              "\u25c6 Matter" + (totalMatter > 0 ? " (" + esc(totalMatter) + ")" : "") +
+              "<ha-icon icon=\"mdi:home-automation\"></ha-icon> Matter" + (totalMatter > 0 ? " (" + esc(totalMatter) + ")" : "") +
+            "</button>" +
+            "<button class=\"tab-btn" + (networkActive ? " tab-active" : "") + "\" data-tab=\"network\">" +
+              "<ha-icon icon=\"mdi:lan\"></ha-icon> Network" + (totalNetwork > 0 ? " (" + esc(totalNetwork) + ")" : "") +
+            "</button>" +
+            "<button class=\"tab-btn" + (zhaActive ? " tab-active" : "") + "\" data-tab=\"zha\">" +
+              "<ha-icon icon=\"mdi:zigbee\"></ha-icon> ZigBee" + (totalZha > 0 ? " (" + esc(totalZha) + ")" : "") +
             "</button>" +
           "</div>";
 
@@ -525,10 +641,14 @@
           tabContentHtml = totalZha === 0
             ? "<div class=\"no-devices\">No ZigBee devices are being monitored yet.<br>Use <em>Configure \u2192 Add ZigBee Device (ZHA)</em> to get started.</div>"
             : zhaGroups.map((g) => this._renderZhaGroup(g)).join("");
-        } else {
+        } else if (matterActive) {
           tabContentHtml = totalMatter === 0
             ? "<div class=\"no-devices\">No Matter devices are being monitored yet.<br>Use <em>Configure \u2192 Add Matter Device</em> to get started.</div>"
             : matterGroups.map((g) => this._renderMatterGroup(g)).join("");
+        } else {
+          tabContentHtml = totalEsphome === 0
+            ? "<div class=\"no-devices\">No ESPHome devices are being monitored yet.<br>Use <em>Configure \u2192 Add ESPHome Device</em> to get started.</div>"
+            : esphomeGroups.map((g) => this._renderEsphomeGroup(g)).join("");
         }
 
         const container = this.shadowRoot.querySelector("#cm-root");
