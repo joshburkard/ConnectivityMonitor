@@ -39,10 +39,10 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
   setConfig(config) {
     var oldConfig = this._config;
     this._config = Object.assign({}, config);
-    // Skip full re-render if only the title changed (input field has focus)
+    // Skip full re-render if an input field has focus (prevents losing cursor position)
     if (oldConfig && this.shadowRoot) {
-      var titleEl = this.shadowRoot.getElementById("cm_title");
-      if (titleEl && titleEl === this.shadowRoot.activeElement) return;
+      var active = this.shadowRoot.activeElement;
+      if (active && (active.id === "cm_title" || active.id === "cm_icon")) return;
     }
     this._render();
   }
@@ -58,6 +58,8 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
     var sf = this._config.status_filter || CM_DEFAULT_STATUS[dt] || "All";
     var title = this._config.title != null ? this._config.title : "";
     var opts = CM_STATUS_OPTIONS[dt] || CM_STATUS_OPTIONS["Network"];
+
+    var icon = this._config.icon != null ? this._config.icon : "";
 
     var dtOptions = "";
     for (var i = 0; i < CM_DEVICE_TYPES.length; i++) {
@@ -78,6 +80,8 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
       "select:focus, input[type=text]:focus { outline:none; border-color:var(--primary-color); }" +
       "</style>" +
       "<div class='form'>" +
+      "<div><label>Icon</label>" +
+      "<input type='text' id='cm_icon' value='" + cmEsc(icon) + "' placeholder='mdi:lan'></div>" +
       "<div><label>Title</label>" +
       "<input type='text' id='cm_title' value='" + cmEsc(title) + "' placeholder='Connectivity Monitor - " + cmEsc(dt) + "'></div>" +
       "<div><label>Device Type</label>" +
@@ -87,6 +91,10 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
       "</div>";
 
     var self = this;
+    this.shadowRoot.getElementById("cm_icon").addEventListener("input", function(e) {
+      self._config = Object.assign({}, self._config, { icon: e.target.value });
+      self._fire();
+    });
     this.shadowRoot.getElementById("cm_title").addEventListener("input", function(e) {
       self._config = Object.assign({}, self._config, { title: e.target.value });
       self._fire();
@@ -129,10 +137,53 @@ class ConnectivityMonitorCard extends HTMLElement {
   getCardSize() { return 8; }
   set hass(hass) {
     this._hass = hass;
-    if (this.shadowRoot) this._render();
+    if (!this.shadowRoot) return;
+    var fp = "";
+    for (var eid in hass.states) {
+      if (eid.indexOf("sensor.connectivity_monitor_") === 0) {
+        fp += eid + "=" + hass.states[eid].state + "|";
+      }
+    }
+    if (fp === this._lastFingerprint) return;
+    this._lastFingerprint = fp;
+    this._render();
   }
   connectedCallback() {
     this.attachShadow({ mode: "open" });
+    // Collapsed state: tracked per entity_id. null = not yet initialised.
+    if (!this._collapsed) this._collapsed = null;
+    // Click handler for navigation + toggle
+    var self = this;
+    this.shadowRoot.addEventListener("click", function(e) {
+      // Toggle chevron
+      var toggleBtn = e.target.closest("[data-toggle]");
+      if (toggleBtn) {
+        e.stopPropagation();
+        var key = toggleBtn.getAttribute("data-toggle");
+        if (self._collapsed.has(key)) self._collapsed.delete(key);
+        else self._collapsed.add(key);
+        self._applyCollapse();
+        return;
+      }
+      // Navigate to device page
+      var devEl = e.target.closest("[data-device]");
+      if (devEl) {
+        e.stopPropagation();
+        var devId = devEl.getAttribute("data-device");
+        window.history.pushState(null, "", "/config/devices/device/" + devId);
+        window.dispatchEvent(new CustomEvent("location-changed"));
+        return;
+      }
+      // Navigate to entity page
+      var entEl = e.target.closest("[data-entity]");
+      if (entEl) {
+        e.stopPropagation();
+        var entId = entEl.getAttribute("data-entity");
+        var evt = new CustomEvent("hass-more-info", { detail: { entityId: entId }, bubbles: true, composed: true });
+        self.dispatchEvent(evt);
+        return;
+      }
+    });
     this._render();
   }
 
@@ -240,6 +291,35 @@ class ConnectivityMonitorCard extends HTMLElement {
   }
 
   // -- Rendering --
+  _isCollapsedStatus(status) {
+    return status === "Connected" || status === "Active";
+  }
+
+  _initCollapsed(devices) {
+    if (this._collapsed !== null) return;
+    this._collapsed = new Set();
+    for (var i = 0; i < devices.length; i++) {
+      if (this._isCollapsedStatus(devices[i].status)) {
+        this._collapsed.add(devices[i].entityId);
+      }
+    }
+  }
+
+  _applyCollapse() {
+    if (!this.shadowRoot || !this._collapsed) return;
+    var btns = this.shadowRoot.querySelectorAll("[data-toggle]");
+    for (var i = 0; i < btns.length; i++) {
+      var btn = btns[i];
+      var key = btn.getAttribute("data-toggle");
+      var card = btn.closest(".device-card");
+      var list = card ? card.querySelector(".sensor-list") : null;
+      var collapsed = this._collapsed.has(key);
+      btn.innerHTML = collapsed ? "\u25b6" : "\u25bc";
+      btn.title = collapsed ? "Expand" : "Collapse";
+      if (list) list.style.display = collapsed ? "none" : "";
+    }
+  }
+
   _renderSensor(sensor) {
     var st = sensor.state;
     var isErr = (st === "Disconnected" || st === "Not Connected");
@@ -254,24 +334,41 @@ class ConnectivityMonitorCard extends HTMLElement {
     else label = cmEsc(proto);
     var latency = sensor.attributes.latency_ms != null
       ? "<span class='sensor-latency'>" + cmEsc(sensor.attributes.latency_ms) + " ms</span>" : "";
-    return "<div class='sensor-row'>" +
+    return "<div class='sensor-row clickable' data-entity='" + cmEsc(sensor.entity_id) + "'>" +
       "<span class='dot dot-" + dot + "'></span>" +
       "<span class='sensor-proto'>" + label + "</span>" +
       "<span class='label-" + dot + "'>" + cmEsc(st) + "</span>" +
-      latency + "</div>";
+      latency +
+      "<span class='row-arrow'>\u203a</span>" +
+      "</div>";
   }
 
   _renderDevice(device) {
     var meta = CM_STATUS_META[device.status] || CM_STATUS_META.Unknown;
     var dt = (this._config && this._config.device_type) || "Network";
+    var collapsed = this._collapsed && this._collapsed.has(device.entityId);
+    var chevron = collapsed ? "\u25b6" : "\u25bc";
+
+    // Resolve HA device_id for navigation
+    var deviceAttr = "data-entity='" + cmEsc(device.entityId) + "'";
+    if (this._hass && this._hass.entities) {
+      var entry = this._hass.entities[device.entityId];
+      if (entry && entry.device_id) {
+        deviceAttr = "data-device='" + cmEsc(entry.device_id) + "'";
+      }
+    }
+
     var html = "<div class='device-card card-" + meta.css + "'>" +
       "<div class='device-header'>" +
-      "<div class='device-info'>" +
+      "<button class='toggle-btn' data-toggle='" + cmEsc(device.entityId) + "' title='" + (collapsed ? "Expand" : "Collapse") + "'>" + chevron + "</button>" +
+      "<div class='device-info clickable' " + deviceAttr + ">" +
       "<div class='device-name'>" + cmEsc(device.name) + "</div>" +
       "<div class='device-host'>" + cmEsc(device.subtitle) + "</div></div>" +
       "<span class='badge badge-" + meta.css + "'>" + cmEsc(device.status) + "</span></div>";
+
+    var sensorDisplay = collapsed ? "none" : "";
     if (dt === "Network" && device.sensors.length > 0) {
-      html += "<div class='sensor-list'>";
+      html += "<div class='sensor-list' style='display:" + sensorDisplay + "'>";
       for (var i = 0; i < device.sensors.length; i++) {
         html += this._renderSensor(device.sensors[i]);
       }
@@ -281,9 +378,19 @@ class ConnectivityMonitorCard extends HTMLElement {
       if (device.minutesAgo < 60) ago = device.minutesAgo + " min ago";
       else if (device.minutesAgo < 1440) ago = Math.round(device.minutesAgo / 60) + " hr ago";
       else ago = Math.round(device.minutesAgo / 1440) + " day(s) ago";
-      html += "<div class='sensor-list'><div class='sensor-row'>" +
+      html += "<div class='sensor-list' style='display:" + sensorDisplay + "'>" +
+        "<div class='sensor-row clickable' data-entity='" + cmEsc(device.entityId) + "'>" +
         "<span class='dot dot-" + meta.css + "'></span>" +
         "<span class='sensor-proto'>Last seen: " + cmEsc(ago) + "</span>" +
+        "<span class='row-arrow'>\u203a</span>" +
+        "</div></div>";
+    } else if ((dt === "Matter" || dt === "ESP32") && device.entityId) {
+      html += "<div class='sensor-list' style='display:" + sensorDisplay + "'>" +
+        "<div class='sensor-row clickable' data-entity='" + cmEsc(device.entityId) + "'>" +
+        "<span class='dot dot-" + meta.css + "'></span>" +
+        "<span class='sensor-proto'>" + cmEsc(dt) + " Status</span>" +
+        "<span class='label-" + meta.css + "'>" + cmEsc(device.status) + "</span>" +
+        "<span class='row-arrow'>\u203a</span>" +
         "</div></div>";
     }
     html += "</div>";
@@ -293,6 +400,8 @@ class ConnectivityMonitorCard extends HTMLElement {
   _styles() {
     return "<style>" +
       "*, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }" +
+      ".card-header { display:flex; align-items:center; gap:8px; padding:16px 16px 0 16px; font-size:1.4rem; font-weight:500; color:var(--ha-card-header-color,var(--primary-text-color)); }" +
+      ".header-icon { --mdc-icon-size:28px; flex-shrink:0; color:var(--primary-text-color); }" +
       ".card-content { padding:16px; }" +
       ".group { margin-bottom:16px; }" +
       ".group-header { display:flex; align-items:center; gap:8px; padding:6px 12px; border-radius:6px 6px 0 0; font-size:0.82rem; font-weight:600; text-transform:uppercase; letter-spacing:.05em; }" +
@@ -319,6 +428,12 @@ class ConnectivityMonitorCard extends HTMLElement {
       ".sensor-list { padding:2px 0; }" +
       ".sensor-row { display:flex; align-items:center; padding:5px 14px; gap:10px; border-bottom:1px solid var(--divider-color,rgba(0,0,0,.06)); font-size:0.85rem; }" +
       ".sensor-row:last-child { border-bottom:none; }" +
+      ".clickable { cursor:pointer; }" +
+      ".clickable:hover { background:var(--secondary-background-color,rgba(0,0,0,.04)); }" +
+      ".toggle-btn { background:none; border:none; cursor:pointer; color:var(--secondary-text-color); font-size:0.7rem; padding:2px 4px; flex-shrink:0; line-height:1; border-radius:3px; }" +
+      ".toggle-btn:hover { background:var(--secondary-background-color,rgba(0,0,0,.08)); }" +
+      ".row-arrow { color:var(--secondary-text-color); font-size:1.1rem; flex-shrink:0; }" +
+      ".device-info:hover .device-name { text-decoration:underline; }" +
       ".dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }" +
       ".dot-error   { background:var(--error-color,#f44336); }" +
       ".dot-warning { background:var(--warning-color,#ff9800); }" +
@@ -339,6 +454,7 @@ class ConnectivityMonitorCard extends HTMLElement {
     var dt = (this._config && this._config.device_type) || "Network";
     var sf = (this._config && this._config.status_filter) || CM_DEFAULT_STATUS[dt] || "All";
     var allDevices = this._getDevices();
+    this._initCollapsed(allDevices);
     var filtered = this._filterDevices(allDevices);
     var groups = this._groupDevices(filtered);
 
@@ -363,8 +479,13 @@ class ConnectivityMonitorCard extends HTMLElement {
       }
     }
 
+    var title = this._config && this._config.title ? this._config.title : "Connectivity Monitor - " + dt;
+    var iconName = this._config && this._config.icon ? this._config.icon : "";
+    var headerIcon = iconName ? "<ha-icon icon='" + cmEsc(iconName) + "' class='header-icon'></ha-icon>" : "";
+
     this.shadowRoot.innerHTML = this._styles() +
-      "<ha-card header='" + cmEsc(this._config && this._config.title ? this._config.title : "Connectivity Monitor - " + dt) + "'>" +
+      "<ha-card>" +
+      "<div class='card-header'>" + headerIcon + "<span>" + cmEsc(title) + "</span></div>" +
       "<div class='card-content'>" + bodyHtml + "</div>" +
       "</ha-card>";
   }

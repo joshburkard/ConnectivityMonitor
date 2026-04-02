@@ -23,9 +23,13 @@ This integration allows to monitor devices and create Alert Notification and Ale
 
 ## Example
 
-### Overview Panel
+### LoveLace Cards
 
-![Overview Panel](images/example-001.png)
+![configure LoveLace Card](images/example-003.png)
+
+![configure LoveLace Card](images/example-004.png)
+
+![LoveLace Card](images/example-001.png)
 
 ### Device View
 
