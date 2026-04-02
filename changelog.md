@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00052 | 02/04/2026 | adjusted and standardized config flow |
 | 0.1.00051 | 02/04/2026 | separate network.py from sensor.py |
 | 0.1.00050 | 02/04/2026 | use DataUpdateCoordinator instead of custom schedulers |
 | 0.1.00049 | 02/04/2026 | changed to use icmplib instead of ping3 |

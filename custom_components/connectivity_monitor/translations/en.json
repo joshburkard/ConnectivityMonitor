@@ -156,9 +156,16 @@
         "step": {
             "menu": {
                 "title": "Connectivity Monitor",
-                "description": "Choose a device category to configure",
+                "description": "Choose what to configure",
                 "data": {
-                    "category": "Category"
+                    "action": "Action"
+                }
+            },
+            "settings_menu": {
+                "title": "General Settings",
+                "description": "Choose a settings action",
+                "data": {
+                    "action": "Action"
                 }
             },
             "network_menu": {

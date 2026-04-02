@@ -68,18 +68,18 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     # Unique IDs and titles for each typed entry
     ENTRY_UNIQUE_IDS = {
+        "bluetooth": "connectivity_monitor_bluetooth",
+        "esphome": "connectivity_monitor_esphome",
+        "matter": "connectivity_monitor_matter",
         "network": "connectivity_monitor_network",
         "zha": "connectivity_monitor_zha",
-        "matter": "connectivity_monitor_matter",
-        "esphome": "connectivity_monitor_esphome",
-        "bluetooth": "connectivity_monitor_bluetooth",
     }
     ENTRY_TITLES = {
+        "bluetooth": "Bluetooth Monitor",
+        "esphome": "ESPHome Monitor",
+        "matter": "Matter Monitor",
         "network": "Network Monitor",
         "zha": "ZigBee Monitor",
-        "matter": "Matter Monitor",
-        "esphome": "ESPHome Monitor",
-        "bluetooth": "Bluetooth Monitor",
     }
 
     def __init__(self):
@@ -175,11 +175,11 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema({
                 vol.Required("device_type", default="network"): vol.In({
+                    "bluetooth": "Bluetooth Device",
+                    "esphome": "ESPHome Device",
+                    "matter": "Matter Device",
                     "network": "Network Device (TCP / UDP / ICMP / AD)",
                     "zha": "ZigBee Device (ZHA)",
-                    "matter": "Matter Device",
-                    "esphome": "ESPHome Device",
-                    "bluetooth": "Bluetooth Device",
                 }),
             }),
         )
@@ -891,6 +891,14 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow."""
 
+    ENTRY_TYPES_BY_UNIQUE_ID = {
+        ConnectivityMonitorConfigFlow.ENTRY_UNIQUE_IDS["network"]: "network",
+        ConnectivityMonitorConfigFlow.ENTRY_UNIQUE_IDS["zha"]: "zha",
+        ConnectivityMonitorConfigFlow.ENTRY_UNIQUE_IDS["matter"]: "matter",
+        ConnectivityMonitorConfigFlow.ENTRY_UNIQUE_IDS["esphome"]: "esphome",
+        ConnectivityMonitorConfigFlow.ENTRY_UNIQUE_IDS["bluetooth"]: "bluetooth",
+    }
+
     def __init__(self) -> None:
         """Initialize options flow."""
         self.config_data = {}
@@ -928,6 +936,42 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 actions[entity_id] = f"{name} ({entity_id})"
         return dict(sorted(actions.items(), key=lambda x: x[1].lower()))
 
+    def _get_entry_type(self) -> str:
+        """Determine the typed config entry this options flow is editing."""
+        entry_type = self.ENTRY_TYPES_BY_UNIQUE_ID.get(self.config_entry.unique_id)
+        if entry_type is not None:
+            return entry_type
+
+        if any(t.get(CONF_PROTOCOL) == PROTOCOL_ZHA for t in self._targets):
+            return "zha"
+        if any(t.get(CONF_PROTOCOL) == PROTOCOL_MATTER for t in self._targets):
+            return "matter"
+        if any(t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME for t in self._targets):
+            return "esphome"
+        if any(t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH for t in self._targets):
+            return "bluetooth"
+        return "network"
+
+    def _get_menu_actions(self) -> dict[str, str]:
+        """Build the top-level options menu for the current entry type."""
+        entry_type = self._get_entry_type()
+        common_actions = {"settings": "General Settings"}
+
+        if entry_type == "network":
+            return {
+                "rename": "Change Host / Device Name",
+                "alerts": "Modify Alert Settings",
+                "remove_device": "Remove Device",
+                "remove_sensor": "Remove Single Sensor",
+                **common_actions,
+            }
+
+        return {
+            "alerts": "Modify Alert Settings",
+            "remove_device": "Remove Device",
+            **common_actions,
+        }
+
     async def async_step_init(self, user_input=None):
         """Manage the options."""
         self.config_data = dict(self.config_entry.data)
@@ -935,48 +979,65 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         return await self.async_step_menu()
 
     async def async_step_menu(self, user_input=None):
-        """Show the top-level category menu."""
+        """Show the top-level action menu."""
         if user_input is not None:
-            category = user_input["category"]
-            if category == "network":
-                return await self.async_step_network_menu()
-            elif category == "zha":
-                return await self.async_step_zha_menu()
-            elif category == "matter":
-                return await self.async_step_matter_menu()
-            elif category == "esphome":
-                return await self.async_step_esphome_menu()
-            elif category == "bluetooth":
-                return await self.async_step_bluetooth_menu()
-            elif category == "settings":
-                return await self.async_step_settings()
-            elif category == "cleanup":
-                return await self.async_step_cleanup_orphans()
+            action = user_input["action"]
+            entry_type = self._get_entry_type()
 
-        has_network = any(t.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH) for t in self._targets)
-        has_zha = any(t.get(CONF_PROTOCOL) == PROTOCOL_ZHA for t in self._targets)
-        has_matter = any(t.get(CONF_PROTOCOL) == PROTOCOL_MATTER for t in self._targets)
-        has_esphome = any(t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME for t in self._targets)
-        has_bluetooth = any(t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH for t in self._targets)
+            if action == "rename":
+                return await self.async_step_rename_device_select()
+            elif action == "alerts":
+                if entry_type == "network":
+                    return await self.async_step_device_select()
+                if entry_type == "zha":
+                    return await self.async_step_zha_alert_select()
+                if entry_type == "matter":
+                    return await self.async_step_matter_alert_select()
+                if entry_type == "esphome":
+                    return await self.async_step_esphome_alert_select()
+                if entry_type == "bluetooth":
+                    return await self.async_step_bluetooth_alert_select()
+            elif action == "remove_device":
+                if entry_type == "network":
+                    return await self.async_step_remove_device()
+                if entry_type == "zha":
+                    return await self.async_step_remove_zha_device()
+                if entry_type == "matter":
+                    return await self.async_step_remove_matter_device()
+                if entry_type == "esphome":
+                    return await self.async_step_remove_esphome_device()
+                if entry_type == "bluetooth":
+                    return await self.async_step_remove_bluetooth_device()
+            elif action == "remove_sensor":
+                return await self.async_step_remove_sensor()
+            elif action == "settings":
+                return await self.async_step_settings_menu()
 
-        categories = {}
-        if has_network:
-            categories["network"] = "Network Device"
-        if has_zha:
-            categories["zha"] = "ZigBee (ZHA) Device"
-        if has_matter:
-            categories["matter"] = "Matter Device"
-        if has_esphome:
-            categories["esphome"] = "ESPHome Device"
-        if has_bluetooth:
-            categories["bluetooth"] = "Bluetooth Device"
-        categories["settings"] = "General Settings"
-        categories["cleanup"] = "Clean up Orphaned Devices"
+        actions = self._get_menu_actions()
 
         return self.async_show_form(
             step_id="menu",
             data_schema=vol.Schema({
-                vol.Required("category"): vol.In(categories),
+                vol.Required("action"): vol.In(actions),
+            }),
+        )
+
+    async def async_step_settings_menu(self, user_input=None):
+        """Show settings-related actions."""
+        if user_input is not None:
+            action = user_input["action"]
+            if action == "general":
+                return await self.async_step_settings()
+            if action == "cleanup":
+                return await self.async_step_cleanup_orphans()
+
+        return self.async_show_form(
+            step_id="settings_menu",
+            data_schema=vol.Schema({
+                vol.Required("action"): vol.In({
+                    "general": "Modify General Settings",
+                    "cleanup": "Clean up Orphaned Devices",
+                }),
             }),
         )
 
