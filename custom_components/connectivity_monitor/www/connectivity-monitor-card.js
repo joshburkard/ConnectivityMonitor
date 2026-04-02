@@ -37,7 +37,13 @@ function cmEsc(s) {
 // --- Visual editor ---
 class ConnectivityMonitorCardEditor extends HTMLElement {
   setConfig(config) {
+    var oldConfig = this._config;
     this._config = Object.assign({}, config);
+    // Skip full re-render if only the title changed (input field has focus)
+    if (oldConfig && this.shadowRoot) {
+      var titleEl = this.shadowRoot.getElementById("cm_title");
+      if (titleEl && titleEl === this.shadowRoot.activeElement) return;
+    }
     this._render();
   }
   set hass(hass) { this._hass = hass; }
@@ -50,6 +56,7 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
     if (!this._config) return;
     var dt = this._config.device_type || "Network";
     var sf = this._config.status_filter || CM_DEFAULT_STATUS[dt] || "All";
+    var title = this._config.title != null ? this._config.title : "";
     var opts = CM_STATUS_OPTIONS[dt] || CM_STATUS_OPTIONS["Network"];
 
     var dtOptions = "";
@@ -67,10 +74,12 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
       "<style>" +
       ".form { display:flex; flex-direction:column; gap:16px; padding:16px; }" +
       "label { font-size:14px; font-weight:500; color:var(--primary-text-color); display:block; margin-bottom:4px; }" +
-      "select { width:100%; padding:8px 12px; border:1px solid var(--divider-color,#e0e0e0); border-radius:4px; background:var(--card-background-color,#fff); color:var(--primary-text-color); font-size:14px; }" +
-      "select:focus { outline:none; border-color:var(--primary-color); }" +
+      "select, input[type=text] { width:100%; padding:8px 12px; border:1px solid var(--divider-color,#e0e0e0); border-radius:4px; background:var(--card-background-color,#fff); color:var(--primary-text-color); font-size:14px; }" +
+      "select:focus, input[type=text]:focus { outline:none; border-color:var(--primary-color); }" +
       "</style>" +
       "<div class='form'>" +
+      "<div><label>Title</label>" +
+      "<input type='text' id='cm_title' value='" + cmEsc(title) + "' placeholder='Connectivity Monitor - " + cmEsc(dt) + "'></div>" +
       "<div><label>Device Type</label>" +
       "<select id='cm_dt'>" + dtOptions + "</select></div>" +
       "<div><label>Status Filter</label>" +
@@ -78,6 +87,10 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
       "</div>";
 
     var self = this;
+    this.shadowRoot.getElementById("cm_title").addEventListener("input", function(e) {
+      self._config = Object.assign({}, self._config, { title: e.target.value });
+      self._fire();
+    });
     this.shadowRoot.getElementById("cm_dt").addEventListener("change", function(e) {
       var v = e.target.value;
       self._config = Object.assign({}, self._config, { device_type: v, status_filter: CM_DEFAULT_STATUS[v] });
@@ -219,7 +232,9 @@ class ConnectivityMonitorCard extends HTMLElement {
       groups.push({ status: status, devices: map[status] });
     }
     groups.sort(function(a, b) {
-      return (CM_STATUS_ORDER[a.status] || 99) - (CM_STATUS_ORDER[b.status] || 99);
+      var oa = CM_STATUS_ORDER[a.status] != null ? CM_STATUS_ORDER[a.status] : 99;
+      var ob = CM_STATUS_ORDER[b.status] != null ? CM_STATUS_ORDER[b.status] : 99;
+      return oa - ob;
     });
     return groups;
   }
@@ -349,7 +364,7 @@ class ConnectivityMonitorCard extends HTMLElement {
     }
 
     this.shadowRoot.innerHTML = this._styles() +
-      "<ha-card header='Connectivity Monitor - " + cmEsc(dt) + "'>" +
+      "<ha-card header='" + cmEsc(this._config && this._config.title ? this._config.title : "Connectivity Monitor - " + dt) + "'>" +
       "<div class='card-content'>" + bodyHtml + "</div>" +
       "</ha-card>";
   }
