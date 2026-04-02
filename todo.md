@@ -18,7 +18,7 @@
 - [ ] Integration Maturity:
     - [x] Replace panel_custom panel with a standard Lovelace card or remove it
     - [x] Replace ping3 with a built-in ICMP approach
-    - [ ] Introduce DataUpdateCoordinator to centralize all polling
+    - [x] Introduce DataUpdateCoordinator to centralize all polling
     - [ ] Write tests:
       — [ ] config flow first
       - [ ] then sensors
