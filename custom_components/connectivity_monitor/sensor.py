@@ -18,8 +18,6 @@ try:
     HAVE_DNS = True
 except ImportError:
     HAVE_DNS = False
-
-from ping3 import ping
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -638,6 +636,8 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
         self._resolver = None
         self._resolved_ip = None
         self._mac_address = None
+        self._icmp_privileged = True if target.get(CONF_PROTOCOL) == PROTOCOL_ICMP else None
+        self._icmp_import_failed = False
         _LOGGER.debug(
             "Initialized coordinator for target %s with interval %s",
             target.get(CONF_HOST),
@@ -713,34 +713,14 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
                     _LOGGER.debug("UDP connection failed: %s", err)
 
             elif protocol == PROTOCOL_ICMP:
-                try:
-                    # ping3 returns None on timeout, False on network/permission
-                    # error, and a float (ms) when the host replies.
-                    # Two consecutive pings are required before declaring
-                    # "Connected" to eliminate false positives caused by
-                    # stale/delayed ICMP Echo Replies, proxy-ARP responses,
-                    # or brief network flaps that can fool a single ping.
-                    def _do_icmp_ping(ip: str, timeout: int):
-                        rt1 = ping(ip, timeout, "ms")
-                        if not isinstance(rt1, float) or rt1 < 0:
-                            return None
-                        rt2 = ping(ip, timeout, "ms")
-                        if not isinstance(rt2, float) or rt2 < 0:
-                            return None
-                        return (rt1 + rt2) / 2
-
-                    response_time = await self.hass.async_add_executor_job(
-                        _do_icmp_ping, self._resolved_ip, DEFAULT_PING_TIMEOUT
-                    )
-                    if isinstance(response_time, float):
-                        result.update({
-                            "connected": True,
-                            "latency": round(response_time, 2)
-                        })
-                    else:
-                        _LOGGER.debug("ICMP ping non-response for %s: %r", self._resolved_ip, response_time)
-                except Exception as err:
-                    _LOGGER.debug("ICMP ping failed: %s", err)
+                response_time = await self._async_icmp_ping(self._resolved_ip)
+                if response_time is not None:
+                    result.update({
+                        "connected": True,
+                        "latency": round(response_time, 2)
+                    })
+                else:
+                    _LOGGER.debug("ICMP ping non-response for %s", self._resolved_ip)
 
             return result
 
@@ -753,6 +733,50 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
                 err
             )
             return result
+
+    async def _async_icmp_ping(self, ip_address: str) -> float | None:
+        """Ping a host using Home Assistant's built-in ICMP approach."""
+        try:
+            from icmplib import NameLookupError, SocketPermissionError, async_ping
+        except ImportError as err:
+            if not self._icmp_import_failed:
+                _LOGGER.error(
+                    "ICMP support is unavailable because icmplib is not installed. "
+                    "Restart Home Assistant so the updated integration requirements can be installed: %s",
+                    err,
+                )
+                self._icmp_import_failed = True
+            return None
+
+        try:
+            response = await async_ping(
+                ip_address,
+                count=2,
+                timeout=DEFAULT_PING_TIMEOUT,
+                privileged=self._icmp_privileged,
+            )
+        except SocketPermissionError:
+            if self._icmp_privileged is True:
+                _LOGGER.debug(
+                    "ICMP raw socket not permitted for %s, retrying unprivileged",
+                    ip_address,
+                )
+                self._icmp_privileged = False
+                return await self._async_icmp_ping(ip_address)
+
+            _LOGGER.debug("ICMP socket permission denied for %s", ip_address)
+            return None
+        except NameLookupError:
+            _LOGGER.debug("ICMP lookup failed for %s", ip_address)
+            return None
+        except Exception as err:
+            _LOGGER.debug("ICMP ping failed for %s: %s", ip_address, err)
+            return None
+
+        if not response.is_alive or response.avg_rtt is None:
+            return None
+
+        return float(response.avg_rtt)
 
     async def _get_resolver(self):
         """Get a DNS resolver instance."""

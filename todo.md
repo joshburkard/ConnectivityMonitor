@@ -17,7 +17,7 @@
     - [ ] 7. **Lutron / KNX** — Niche but have HA integrations with device registries.
 - [ ] Integration Maturity:
     - [x] Replace panel_custom panel with a standard Lovelace card or remove it
-    - [ ] Replace ping3 with a built-in ICMP approach
+    - [x] Replace ping3 with a built-in ICMP approach
     - [ ] Introduce DataUpdateCoordinator to centralize all polling
     - [ ] Write tests:
       — [ ] config flow first

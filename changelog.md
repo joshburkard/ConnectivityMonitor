@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00049 | 02/04/2026 | changed to use icmplib instead of ping3 |
 | 0.1.00048 | 02/04/2026 | added support for monitoring Bluetooth connected devices |
 | 0.1.00047 | 02/04/2026 | cleanup of old panel.js and adjusted readme |
 | 0.1.00046 | 02/04/2026 | LoveLace card device order and title |
