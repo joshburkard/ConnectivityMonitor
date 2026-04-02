@@ -113,6 +113,26 @@
                     "alert_action": "Alert Action (automation or script)",
                     "alert_action_delay": "Action Delay (minutes)"
                 }
+            },
+            "bluetooth_device": {
+                "title": "Add Bluetooth Device",
+                "description": "Select a Bluetooth device registered in Home Assistant to monitor",
+                "data": {
+                    "bt_address": "Bluetooth Device"
+                }
+            },
+            "bluetooth_configure": {
+                "title": "Configure Bluetooth Device",
+                "description": "Set a friendly name and alert settings for **{device_name}** ({bt_address})",
+                "data": {
+                    "device_name": "Device Name (optional)",
+                    "alerts_enabled": "Enable Alerts",
+                    "alert_group": "Alert Group",
+                    "alert_delay": "Alert Delay (minutes)",
+                    "alert_action_enabled": "Enable Alert Action",
+                    "alert_action": "Alert Action (automation or script)",
+                    "alert_action_delay": "Action Delay (minutes)"
+                }
             }
         },
         "error": {
@@ -123,7 +143,9 @@
             "no_matter_devices": "No Matter devices found. Make sure the Matter integration is configured and has commissioned devices.",
             "all_matter_devices_added": "All commissioned Matter devices are already being monitored.",
             "no_esphome_devices": "No ESPHome devices found. Make sure the ESPHome integration is configured and has devices.",
-            "all_esphome_devices_added": "All ESPHome devices are already being monitored."
+            "all_esphome_devices_added": "All ESPHome devices are already being monitored.",
+            "no_bluetooth_devices": "No Bluetooth devices found. Make sure Bluetooth is configured and devices are available in Home Assistant.",
+            "all_bluetooth_devices_added": "All Bluetooth devices are already being monitored."
         },
         "abort": {
             "device_added": "Device has been added successfully",
@@ -262,6 +284,39 @@
                     "device_id": "ESPHome Device"
                 }
             },
+            "bluetooth_menu": {
+                "title": "Bluetooth Device",
+                "description": "Choose an action for your Bluetooth device",
+                "data": {
+                    "action": "Action"
+                }
+            },
+            "bluetooth_alert_select": {
+                "title": "Modify Bluetooth Alert Settings",
+                "description": "Select the Bluetooth device to configure alerts for",
+                "data": {
+                    "bt_address": "Bluetooth Device"
+                }
+            },
+            "bluetooth_alert_config": {
+                "title": "Bluetooth Alert Configuration",
+                "description": "Configure alert settings for the selected Bluetooth device",
+                "data": {
+                    "alerts_enabled": "Enable Alerts",
+                    "alert_group": "Alert Group",
+                    "alert_delay": "Alert Delay (minutes)",
+                    "alert_action_enabled": "Enable Alert Action",
+                    "alert_action": "Alert Action (automation or script)",
+                    "alert_action_delay": "Action Delay (minutes)"
+                }
+            },
+            "remove_bluetooth_device": {
+                "title": "Remove Bluetooth Device",
+                "description": "Select the Bluetooth device to stop monitoring",
+                "data": {
+                    "bt_address": "Bluetooth Device"
+                }
+            },
             "zha_alert_select": {
                 "title": "Modify ZigBee Alert Settings",
                 "description": "Select the ZigBee device to configure alerts for",
@@ -324,7 +379,9 @@
             "no_matter_devices": "No Matter devices found. Make sure the Matter integration is configured and has commissioned devices.",
             "all_matter_devices_added": "All commissioned Matter devices are already being monitored.",
             "no_esphome_devices": "No ESPHome devices found. Make sure the ESPHome integration is configured and has devices.",
-            "all_esphome_devices_added": "All ESPHome devices are already being monitored."
+            "all_esphome_devices_added": "All ESPHome devices are already being monitored.",
+            "no_bluetooth_devices": "No Bluetooth devices found. Make sure Bluetooth is configured and devices are available in Home Assistant.",
+            "all_bluetooth_devices_added": "All Bluetooth devices are already being monitored."
         },
         "abort": {
             "cleanup_done": "Orphaned device cleanup completed."

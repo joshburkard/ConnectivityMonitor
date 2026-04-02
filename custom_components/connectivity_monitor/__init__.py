@@ -12,7 +12,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import (
     DOMAIN, CONF_TARGETS, CONF_INTERVAL, CONF_DNS_SERVER,
-    PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, DEFAULT_INTERVAL, DEFAULT_DNS_SERVER,
+    PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, DEFAULT_INTERVAL, DEFAULT_DNS_SERVER, VERSION,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -93,7 +93,8 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the Connectivity Monitor component."""
     hass.data.setdefault(DOMAIN, {})
 
-    card_url = "/connectivity_monitor_panel/connectivity-monitor-card.js"
+    card_base_url = "/connectivity_monitor_panel/connectivity-monitor-card.js"
+    card_url = f"{card_base_url}?v={VERSION}"
 
     # Serve www/ folder so the card JS is reachable via HTTP
     try:
@@ -119,10 +120,22 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
             if resources is None:
                 return
             await resources.async_load()
-            if any(r.get("url") == card_url for r in resources.async_items()):
+            current_resources = list(resources.async_items())
+            if any(r.get("url") == card_url for r in current_resources):
                 return
+
+            for resource in current_resources:
+                resource_url = resource.get("url", "")
+                if resource_url == card_base_url or resource_url.startswith(f"{card_base_url}?"):
+                    await resources.async_update_item(resource["id"], {"url": card_url})
+                    _LOGGER.info(
+                        "Connectivity Monitor: Lovelace resource updated to %s",
+                        card_url,
+                    )
+                    return
+
             await resources.async_create_item({"res_type": "module", "url": card_url})
-            _LOGGER.info("Connectivity Monitor: Lovelace resource registered")
+            _LOGGER.info("Connectivity Monitor: Lovelace resource registered at %s", card_url)
         except Exception as err:
             _LOGGER.warning("Connectivity Monitor: could not register Lovelace resource: %s", err)
 

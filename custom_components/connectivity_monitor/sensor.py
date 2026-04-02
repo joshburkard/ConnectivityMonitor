@@ -58,11 +58,13 @@ from .const import (
     PROTOCOL_ZHA,
     PROTOCOL_MATTER,
     PROTOCOL_ESPHOME,
+    PROTOCOL_BLUETOOTH,
     CONF_ZHA_IEEE,
     CONF_INACTIVE_TIMEOUT,
     DEFAULT_INACTIVE_TIMEOUT,
     CONF_MATTER_NODE_ID,
     CONF_ESPHOME_DEVICE_ID,
+    CONF_BLUETOOTH_ADDRESS,
     DEFAULT_PING_TIMEOUT,
     DEFAULT_DNS_SERVER,
     DEFAULT_INTERVAL,
@@ -89,10 +91,11 @@ async def async_setup_entry(
     _LOGGER.debug("Targets to process: %s", targets)
 
     # Separate ZHA targets from regular network targets
-    network_targets = [t for t in targets if t.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME)]
+    network_targets = [t for t in targets if t.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH)]
     zha_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
     matter_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER]
     esphome_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME]
+    bluetooth_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH]
 
     # Create alert handler
     alert_handler = AlertHandler(hass)
@@ -226,6 +229,20 @@ async def async_setup_entry(
         except Exception as err:
             _LOGGER.exception("Error creating ESPHome sensor for target %s: %s", target, err)
 
+    # Process Bluetooth device targets
+    for target in bluetooth_targets:
+        try:
+            coordinator = BluetoothCoordinator(hass, target, update_interval)
+            await coordinator.async_config_entry_first_refresh()
+            sensor = BluetoothSensor(coordinator, target)
+            entities.append(sensor)
+            new_unique_ids.add(sensor.unique_id)
+            _LOGGER.debug("Created Bluetooth sensor: entity_id=%s, unique_id=%s",
+                         sensor.entity_id, sensor.unique_id)
+            sensor._alert_handler = alert_handler
+        except Exception as err:
+            _LOGGER.exception("Error creating Bluetooth sensor for target %s: %s", target, err)
+
     # Remove old entities
     for entity in existing_entities:
         if entity.unique_id not in new_unique_ids:
@@ -319,7 +336,7 @@ class AlertHandler:
             if eid in self._last_disconnected:
                 continue
             is_zha_chk = tgt.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-            is_inactive_chk = tgt.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME)
+            is_inactive_chk = tgt.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH)
             problem_states_chk = ["Inactive"] if is_inactive_chk else ["Disconnected", "Not Connected", "Partially Connected"]
             cur_state = self.hass.states.get(eid)
             if cur_state and cur_state.state in problem_states_chk:
@@ -330,6 +347,8 @@ class AlertHandler:
                     ident = tgt.get(CONF_MATTER_NODE_ID, tgt.get(CONF_HOST, eid))
                 elif tgt.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME:
                     ident = tgt.get(CONF_ESPHOME_DEVICE_ID, tgt.get(CONF_HOST, eid))
+                elif tgt.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH:
+                    ident = tgt.get(CONF_BLUETOOTH_ADDRESS, tgt.get(CONF_HOST, eid))
                 elif is_zha_chk:
                     ident = tgt.get(CONF_ZHA_IEEE, tgt.get(CONF_HOST, eid))
                 else:
@@ -346,13 +365,15 @@ class AlertHandler:
 
             target = self._targets[entity_id]
             is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-            is_inactive = target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME)
+            is_inactive = target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH)
             problem_states = ["Inactive"] if is_inactive else ["Disconnected", "Not Connected", "Partially Connected"]
             recovery_state = "Active" if is_inactive else "Connected"
             if target.get(CONF_PROTOCOL) == PROTOCOL_MATTER:
                 identifier = target.get(CONF_MATTER_NODE_ID, target[CONF_HOST])
             elif target.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME:
                 identifier = target.get(CONF_ESPHOME_DEVICE_ID, target[CONF_HOST])
+            elif target.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH:
+                identifier = target.get(CONF_BLUETOOTH_ADDRESS, target[CONF_HOST])
             elif is_zha:
                 identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST])
             else:
@@ -538,13 +559,15 @@ class AlertHandler:
 
             current_time = datetime.now()
             is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-            is_inactive = target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME)
+            is_inactive = target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH)
             problem_states = ["Inactive"] if is_inactive else ["Disconnected", "Not Connected", "Partially Connected"]
             recovery_state = "Active" if is_inactive else "Connected"
             if target.get(CONF_PROTOCOL) == PROTOCOL_MATTER:
                 identifier = target.get(CONF_MATTER_NODE_ID, target[CONF_HOST])
             elif target.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME:
                 identifier = target.get(CONF_ESPHOME_DEVICE_ID, target[CONF_HOST])
+            elif target.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH:
+                identifier = target.get(CONF_BLUETOOTH_ADDRESS, target[CONF_HOST])
             elif is_zha:
                 identifier = target.get(CONF_ZHA_IEEE, target[CONF_HOST])
             else:
@@ -803,6 +826,9 @@ class ConnectivityCoordinator(DataUpdateCoordinator):
 
             # Get resolver with configured DNS server
             resolver = await self._get_resolver()
+            if resolver is None:
+                _LOGGER.debug("DNS resolver unavailable for host %s", hostname)
+                return None
 
             def _do_resolve():
                 try:
@@ -1519,6 +1545,116 @@ class ESPHomeSensor(CoordinatorEntity, SensorEntity):
         if self.coordinator.data and self.coordinator.data.get("active"):
             return "mdi:chip"
         return "mdi:lan-disconnect"
+
+    async def async_added_to_hass(self) -> None:
+        """Set up alerts after entity_id is finalised by HA registry."""
+        await super().async_added_to_hass()
+        alert_handler = getattr(self, "_alert_handler", None)
+        if alert_handler and (self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)):
+            await alert_handler.async_setup_alerts(self.entity_id, self.coordinator)
+
+
+class BluetoothCoordinator(DataUpdateCoordinator):
+    """Manages polling Bluetooth device availability for a single Bluetooth device."""
+
+    def __init__(self, hass: HomeAssistant, target: dict, update_interval: int) -> None:
+        """Initialize the Bluetooth coordinator."""
+        super().__init__(
+            hass,
+            _LOGGER,
+            name=DOMAIN,
+            update_interval=timedelta(seconds=update_interval),
+        )
+        self.target = target
+
+    async def _async_update_data(self) -> dict[str, Any]:
+        """Check entity availability for the Bluetooth device."""
+        from .bluetooth import async_get_bluetooth_device_details
+
+        bt_address = self.target[CONF_BLUETOOTH_ADDRESS]
+
+        return await async_get_bluetooth_device_details(self.hass, bt_address)
+
+
+class BluetoothSensor(CoordinatorEntity, SensorEntity):
+    """Sensor for a Bluetooth device activity status based on entity availability."""
+
+    def __init__(self, coordinator: BluetoothCoordinator, target: dict) -> None:
+        """Initialize the Bluetooth sensor."""
+        super().__init__(coordinator)
+        self.target = target
+        self._attr_has_entity_name = True
+        self._attr_available = True
+        self._attr_entity_category = EntityCategory.DIAGNOSTIC
+
+        device_name = target.get("device_name", target[CONF_BLUETOOTH_ADDRESS])
+        safe_name = (
+            device_name.lower()
+            .replace(" ", "_")
+            .replace("-", "_")
+            .replace(".", "_")
+            .replace(":", "_")
+        )
+
+        self._attr_name = "Bluetooth Status"
+        self.entity_id = f"sensor.connectivity_monitor_bluetooth_{safe_name}"
+
+        bt_address_clean = target[CONF_BLUETOOTH_ADDRESS].replace("-", "_").replace(":", "_")
+        self._attr_unique_id = f"connectivity_bluetooth_{bt_address_clean}"
+
+        self._attr_device_info = DeviceInfo(
+            identifiers={("bluetooth", target[CONF_BLUETOOTH_ADDRESS])},
+        )
+
+    @property
+    def native_value(self) -> str:
+        """Return Active / Inactive / Unknown."""
+        if not self.coordinator.data:
+            return "Unknown"
+        if not self.coordinator.data.get("device_found"):
+            return "Unknown"
+        return "Active" if self.coordinator.data.get("active") else "Inactive"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return additional attributes used by the panel."""
+        bt_address = self.target[CONF_BLUETOOTH_ADDRESS]
+        attrs = {
+            "bt_address": bt_address,
+            "device_name": self.target.get("device_name", bt_address),
+            "monitor_type": "bluetooth",
+        }
+        if self.coordinator.data:
+            if self.coordinator.data.get("rssi") is not None:
+                attrs["rssi"] = self.coordinator.data["rssi"]
+            if self.coordinator.data.get("source"):
+                attrs["source"] = self.coordinator.data["source"]
+            if self.coordinator.data.get("connectable") is not None:
+                attrs["connectable"] = self.coordinator.data["connectable"]
+            if self.coordinator.data.get("service_uuids"):
+                attrs["service_uuids"] = self.coordinator.data["service_uuids"]
+            if self.coordinator.data.get("manufacturer_data"):
+                attrs["manufacturer_data"] = self.coordinator.data["manufacturer_data"]
+            if self.coordinator.data.get("service_data"):
+                attrs["service_data"] = self.coordinator.data["service_data"]
+            if self.coordinator.data.get("time") is not None:
+                attrs["last_seen_time"] = self.coordinator.data["time"]
+            if self.coordinator.data.get("tx_power") is not None:
+                attrs["tx_power"] = self.coordinator.data["tx_power"]
+        if self.target.get(CONF_ALERT_GROUP):
+            attrs["alert_group"] = self.target[CONF_ALERT_GROUP]
+            attrs["alert_delay"] = self.target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+        if self.target.get(CONF_ALERT_ACTION):
+            attrs["alert_action"] = self.target[CONF_ALERT_ACTION]
+            attrs["alert_action_delay"] = self.target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+        return attrs
+
+    @property
+    def icon(self) -> str:
+        """Return the icon to use in the frontend."""
+        if self.coordinator.data and self.coordinator.data.get("active"):
+            return "mdi:bluetooth"
+        return "mdi:bluetooth-off"
 
     async def async_added_to_hass(self) -> None:
         """Set up alerts after entity_id is finalised by HA registry."""

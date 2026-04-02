@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00048 | 02/04/2026 | added support for monitoring Bluetooth connected devices |
 | 0.1.00047 | 02/04/2026 | cleanup of old panel.js and adjusted readme |
 | 0.1.00046 | 02/04/2026 | LoveLace card device order and title |
 | 0.1.00045 | 02/04/2026 | first working version of LoveLace card |

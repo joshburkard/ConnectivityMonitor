@@ -48,9 +48,9 @@ PROTOCOL_AD_DC = "AD_DC"
 PROTOCOL_ZHA = "ZHA"
 PROTOCOL_MATTER = "MATTER"
 PROTOCOL_ESPHOME = "ESPHOME"
+PROTOCOL_BLUETOOTH = "BLUETOOTH"
 
 PROTOCOLS = [PROTOCOL_TCP, PROTOCOL_UDP, PROTOCOL_ICMP, PROTOCOL_AD_DC]
-
 # ZHA / ZigBee device monitoring
 CONF_ZHA_IEEE = "ieee"
 CONF_INACTIVE_TIMEOUT = "inactive_timeout"
@@ -61,6 +61,9 @@ CONF_MATTER_NODE_ID = "matter_node_id"
 
 # ESPHome device monitoring
 CONF_ESPHOME_DEVICE_ID = "esphome_device_id"
+
+# Bluetooth device monitoring
+CONF_BLUETOOTH_ADDRESS = "bt_address"
 
 # Default RPC ports
 RPC_DEFAULT_PORTS = [111, 135, 139, 445]

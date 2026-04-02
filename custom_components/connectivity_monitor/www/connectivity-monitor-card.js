@@ -1,7 +1,8 @@
 console.log("[CM] script start");
 
-var CM_DEVICE_TYPES = ["ESP32", "Matter", "Network", "ZigBee"];
+var CM_DEVICE_TYPES = ["Bluetooth", "ESP32", "Matter", "Network", "ZigBee"];
 var CM_STATUS_OPTIONS = {
+  Bluetooth: ["Active", "Inactive", "All"],
   ESP32:    ["Active", "Inactive", "All"],
   Matter:   ["Active", "Inactive", "All"],
   ZigBee:   ["Active", "Inactive", "All"],
@@ -9,7 +10,7 @@ var CM_STATUS_OPTIONS = {
              "Disconnected & Partially Connected",
              "Connected & Partially Connected", "All"]
 };
-var CM_DEFAULT_STATUS = { ESP32: "All", Matter: "All", ZigBee: "All", Network: "All" };
+var CM_DEFAULT_STATUS = { Bluetooth: "All", ESP32: "All", Matter: "All", ZigBee: "All", Network: "All" };
 
 var CM_STATUS_META = {
   Connected:             { label: "Connected",            css: "ok",      icon: "\u2713" },
@@ -152,6 +153,7 @@ class ConnectivityMonitorCard extends HTMLElement {
     this.attachShadow({ mode: "open" });
     // Collapsed state: tracked per entity_id. null = not yet initialised.
     if (!this._collapsed) this._collapsed = null;
+    if (!this._lastDeviceStatuses) this._lastDeviceStatuses = null;
     // Click handler for navigation + toggle
     var self = this;
     this.shadowRoot.addEventListener("click", function(e) {
@@ -202,6 +204,7 @@ class ConnectivityMonitorCard extends HTMLElement {
         if (st.attributes.monitor_type === "zha") continue;
         if (st.attributes.monitor_type === "matter") continue;
         if (st.attributes.monitor_type === "esphome") continue;
+        if (st.attributes.monitor_type === "bluetooth") continue;
         var host = st.attributes.host || "";
         var sensors = [];
         for (var sid in states) {
@@ -209,7 +212,7 @@ class ConnectivityMonitorCard extends HTMLElement {
           if (!sid.startsWith("sensor.connectivity_monitor_")) continue;
           if (sid.endsWith("_overall") || sid.endsWith("_ad")) continue;
           if (ss.attributes.host !== host) continue;
-          if (ss.attributes.monitor_type === "zha" || ss.attributes.monitor_type === "matter" || ss.attributes.monitor_type === "esphome") continue;
+          if (ss.attributes.monitor_type === "zha" || ss.attributes.monitor_type === "matter" || ss.attributes.monitor_type === "esphome" || ss.attributes.monitor_type === "bluetooth") continue;
           sensors.push(ss);
         }
         sensors.sort(function(a, b) {
@@ -226,7 +229,7 @@ class ConnectivityMonitorCard extends HTMLElement {
         });
       }
     } else {
-      var monitorType = dt === "ZigBee" ? "zha" : dt === "Matter" ? "matter" : "esphome";
+      var monitorType = dt === "ZigBee" ? "zha" : dt === "Matter" ? "matter" : dt === "Bluetooth" ? "bluetooth" : "esphome";
       for (var eid in states) {
         if (!eid.startsWith("sensor.connectivity_monitor_")) continue;
         var s = states[eid];
@@ -234,6 +237,7 @@ class ConnectivityMonitorCard extends HTMLElement {
         var sub = "";
         if (monitorType === "zha") sub = s.attributes.ieee || "";
         else if (monitorType === "matter") sub = s.attributes.node_id || "";
+        else if (monitorType === "bluetooth") sub = s.attributes.bt_address || "";
         else sub = s.attributes.device_id || "";
         devices.push({
           entityId: eid,
@@ -298,11 +302,43 @@ class ConnectivityMonitorCard extends HTMLElement {
   _initCollapsed(devices) {
     if (this._collapsed !== null) return;
     this._collapsed = new Set();
+    this._lastDeviceStatuses = {};
     for (var i = 0; i < devices.length; i++) {
       if (this._isCollapsedStatus(devices[i].status)) {
         this._collapsed.add(devices[i].entityId);
       }
+      this._lastDeviceStatuses[devices[i].entityId] = devices[i].status;
     }
+  }
+
+  _syncCollapsedWithStatus(devices) {
+    if (this._collapsed === null || this._lastDeviceStatuses === null) {
+      this._initCollapsed(devices);
+      return;
+    }
+
+    var currentStatuses = {};
+    for (var i = 0; i < devices.length; i++) {
+      var device = devices[i];
+      var entityId = device.entityId;
+      var status = device.status;
+      var previousStatus = this._lastDeviceStatuses[entityId];
+
+      currentStatuses[entityId] = status;
+
+      if (previousStatus == null) {
+        if (this._isCollapsedStatus(status)) this._collapsed.add(entityId);
+        else this._collapsed.delete(entityId);
+        continue;
+      }
+
+      if (previousStatus !== status) {
+        if (this._isCollapsedStatus(status)) this._collapsed.add(entityId);
+        else this._collapsed.delete(entityId);
+      }
+    }
+
+    this._lastDeviceStatuses = currentStatuses;
   }
 
   _applyCollapse() {
@@ -454,7 +490,7 @@ class ConnectivityMonitorCard extends HTMLElement {
     var dt = (this._config && this._config.device_type) || "Network";
     var sf = (this._config && this._config.status_filter) || CM_DEFAULT_STATUS[dt] || "All";
     var allDevices = this._getDevices();
-    this._initCollapsed(allDevices);
+    this._syncCollapsedWithStatus(allDevices);
     var filtered = this._filterDevices(allDevices);
     var groups = this._groupDevices(filtered);
 

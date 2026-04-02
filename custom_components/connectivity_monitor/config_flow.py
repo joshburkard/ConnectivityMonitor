@@ -43,11 +43,13 @@ from .const import (
     PROTOCOL_ZHA,
     PROTOCOL_MATTER,
     PROTOCOL_ESPHOME,
+    PROTOCOL_BLUETOOTH,
     CONF_ZHA_IEEE,
     CONF_INACTIVE_TIMEOUT,
     DEFAULT_INACTIVE_TIMEOUT,
     CONF_MATTER_NODE_ID,
     CONF_ESPHOME_DEVICE_ID,
+    CONF_BLUETOOTH_ADDRESS,
     AD_DC_PORTS
 )
 
@@ -70,12 +72,14 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         "zha": "connectivity_monitor_zha",
         "matter": "connectivity_monitor_matter",
         "esphome": "connectivity_monitor_esphome",
+        "bluetooth": "connectivity_monitor_bluetooth",
     }
     ENTRY_TITLES = {
         "network": "Network Monitor",
         "zha": "ZigBee Monitor",
         "matter": "Matter Monitor",
         "esphome": "ESPHome Monitor",
+        "bluetooth": "Bluetooth Monitor",
     }
 
     def __init__(self):
@@ -98,6 +102,11 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._esphome_selected_manufacturer: str | None = None
         self._esphome_selected_identifier: str | None = None
         self._esphome_selected_mac: str | None = None
+        # Bluetooth device selection state
+        self._bluetooth_selected_address: str | None = None
+        self._bluetooth_selected_name: str | None = None
+        self._bluetooth_selected_model: str | None = None
+        self._bluetooth_selected_manufacturer: str | None = None
 
     @staticmethod
     @callback
@@ -157,6 +166,8 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return await self.async_step_matter_device()
             elif user_input["device_type"] == "esphome":
                 return await self.async_step_esphome_device()
+            elif user_input["device_type"] == "bluetooth":
+                return await self.async_step_bluetooth_device()
             else:
                 return await self.async_step_network()
 
@@ -168,6 +179,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "zha": "ZigBee Device (ZHA)",
                     "matter": "Matter Device",
                     "esphome": "ESPHome Device",
+                    "bluetooth": "Bluetooth Device",
                 }),
             }),
         )
@@ -607,6 +619,127 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
+    async def async_step_bluetooth_device(self, user_input=None):
+        """Select a Bluetooth device to add to monitoring (main config flow)."""
+        from .bluetooth import async_get_bluetooth_devices
+
+        entries = self._async_current_entries()
+        bluetooth_entry = next(
+            (e for e in entries if e.unique_id == self.ENTRY_UNIQUE_IDS["bluetooth"]), None
+        )
+        existing_addresses = {
+            t.get(CONF_BLUETOOTH_ADDRESS)
+            for t in (bluetooth_entry.data.get(CONF_TARGETS, []) if bluetooth_entry else [])
+            if t.get(CONF_BLUETOOTH_ADDRESS)
+        }
+
+        bluetooth_devices = await async_get_bluetooth_devices(self.hass)
+        if not bluetooth_devices:
+            return self.async_show_form(
+                step_id="bluetooth_device",
+                errors={"base": "no_bluetooth_devices"},
+                data_schema=vol.Schema({}),
+            )
+
+        available = [d for d in bluetooth_devices if d["bt_address"] not in existing_addresses]
+        if not available:
+            return self.async_show_form(
+                step_id="bluetooth_device",
+                errors={"base": "all_bluetooth_devices_added"},
+                data_schema=vol.Schema({}),
+            )
+
+        if user_input is not None:
+            self._bluetooth_selected_address = user_input[CONF_BLUETOOTH_ADDRESS]
+            matched = next(
+                (d for d in bluetooth_devices if d["bt_address"] == self._bluetooth_selected_address), {}
+            )
+            self._bluetooth_selected_name = matched.get("name") or self._bluetooth_selected_address
+            self._bluetooth_selected_model = matched.get("model")
+            self._bluetooth_selected_manufacturer = matched.get("manufacturer")
+            return await self.async_step_bluetooth_configure()
+
+        device_choices = {
+            d["bt_address"]: (
+                f"{d['name']} ({d['bt_address']})"
+                + (f" RSSI {d['rssi']} dBm" if d.get("rssi") is not None else "")
+            )
+            for d in sorted(available, key=lambda x: x["name"].lower())
+        }
+        return self.async_show_form(
+            step_id="bluetooth_device",
+            data_schema=vol.Schema({
+                vol.Required(CONF_BLUETOOTH_ADDRESS): vol.In(device_choices),
+            }),
+        )
+
+    async def async_step_bluetooth_configure(self, user_input=None):
+        """Set device name and alert settings for the selected Bluetooth device."""
+        entries = self._async_current_entries()
+
+        if user_input is not None:
+            device_name = (user_input.get("device_name") or "").strip() or self._bluetooth_selected_name
+            alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
+            action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
+            new_target = {
+                CONF_PROTOCOL: PROTOCOL_BLUETOOTH,
+                CONF_HOST: f"bluetooth:{self._bluetooth_selected_address}",
+                CONF_BLUETOOTH_ADDRESS: self._bluetooth_selected_address,
+                "device_name": device_name,
+                CONF_ALERT_GROUP: (
+                    user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
+                ) if alerts_enabled else DEFAULT_ALERT_GROUP,
+                CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
+                CONF_ALERT_ACTION: (
+                    user_input.get(CONF_ALERT_ACTION, "") or ""
+                ) if action_enabled else "",
+                CONF_ALERT_ACTION_DELAY: user_input.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
+            }
+            if self._bluetooth_selected_model:
+                new_target["model"] = self._bluetooth_selected_model
+            if self._bluetooth_selected_manufacturer:
+                new_target["manufacturer"] = self._bluetooth_selected_manufacturer
+
+            targets = list(self._data.get(CONF_TARGETS, []))
+            targets.append(new_target)
+            self._data[CONF_TARGETS] = targets
+            self._data[CONF_PROTOCOL] = PROTOCOL_BLUETOOTH
+
+            if not entries:
+                return await self.async_step_dns()
+            return await self.async_step_finish()
+
+        notify_groups = await self._async_get_notify_groups()
+        alert_actions = await self._async_get_alert_actions()
+        schema = {
+            vol.Optional("device_name", default=self._bluetooth_selected_name or ""): str,
+            vol.Optional(CONF_ALERTS_ENABLED, default=False): bool,
+            vol.Required(CONF_ALERT_DELAY, default=DEFAULT_ALERT_DELAY): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=60)
+            ),
+        }
+        if notify_groups:
+            notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
+            notify_groups_dict[""] = "No alert group"
+            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
+        schema[vol.Optional(CONF_ALERT_ACTION_ENABLED, default=False)] = bool
+        schema[vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)] = vol.All(
+            vol.Coerce(int), vol.Range(min=1, max=120)
+        )
+        if alert_actions:
+            actions_dict = {"": "No action"}
+            actions_dict.update(alert_actions)
+            schema[vol.Optional(CONF_ALERT_ACTION, default="")] = vol.In(actions_dict)
+
+        return self.async_show_form(
+            step_id="bluetooth_configure",
+            data_schema=vol.Schema(schema),
+            description_placeholders={
+                "device_name": self._bluetooth_selected_name or "",
+                "bt_address": self._bluetooth_selected_address or "",
+            },
+        )
+
     async def async_step_dns(self, user_input=None):
         """Handle DNS server configuration."""
         errors = {}
@@ -673,6 +806,8 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             entry_type = "matter"
         elif protocol == PROTOCOL_ESPHOME:
             entry_type = "esphome"
+        elif protocol == PROTOCOL_BLUETOOTH:
+            entry_type = "bluetooth"
         else:
             entry_type = "network"
 
@@ -721,10 +856,15 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     for t in new_items:
                         if t.get(CONF_MATTER_NODE_ID) not in existing_keys:
                             existing.append(t)
-                else:  # esphome
+                elif entry_type == "esphome":
                     existing_keys = {t.get(CONF_ESPHOME_DEVICE_ID) for t in existing}
                     for t in new_items:
                         if t.get(CONF_ESPHOME_DEVICE_ID) not in existing_keys:
+                            existing.append(t)
+                else:  # bluetooth
+                    existing_keys = {t.get(CONF_BLUETOOTH_ADDRESS) for t in existing}
+                    for t in new_items:
+                        if t.get(CONF_BLUETOOTH_ADDRESS) not in existing_keys:
                             existing.append(t)
                 targets = existing
             else:
@@ -768,6 +908,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         self._matter_selected_manufacturer: str | None = None
         # ESPHome device selection state
         self._esphome_selected_device_id: str | None = None
+        # Bluetooth device selection state
+        self._bluetooth_selected_address: str | None = None
 
     async def _async_get_notify_groups(self):
         """Get list of notification groups from Home Assistant."""
@@ -804,15 +946,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 return await self.async_step_matter_menu()
             elif category == "esphome":
                 return await self.async_step_esphome_menu()
+            elif category == "bluetooth":
+                return await self.async_step_bluetooth_menu()
             elif category == "settings":
                 return await self.async_step_settings()
             elif category == "cleanup":
                 return await self.async_step_cleanup_orphans()
 
-        has_network = any(t.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME) for t in self._targets)
+        has_network = any(t.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH) for t in self._targets)
         has_zha = any(t.get(CONF_PROTOCOL) == PROTOCOL_ZHA for t in self._targets)
         has_matter = any(t.get(CONF_PROTOCOL) == PROTOCOL_MATTER for t in self._targets)
         has_esphome = any(t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME for t in self._targets)
+        has_bluetooth = any(t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH for t in self._targets)
 
         categories = {}
         if has_network:
@@ -823,6 +968,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             categories["matter"] = "Matter Device"
         if has_esphome:
             categories["esphome"] = "ESPHome Device"
+        if has_bluetooth:
+            categories["bluetooth"] = "Bluetooth Device"
         categories["settings"] = "General Settings"
         categories["cleanup"] = "Clean up Orphaned Devices"
 
@@ -1049,6 +1196,154 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             }),
         )
 
+    async def async_step_bluetooth_menu(self, user_input=None):
+        """Show the Bluetooth Device sub-menu."""
+        if user_input is not None:
+            action = user_input["action"]
+            if action == "alerts":
+                return await self.async_step_bluetooth_alert_select()
+            elif action == "remove":
+                return await self.async_step_remove_bluetooth_device()
+
+        return self.async_show_form(
+            step_id="bluetooth_menu",
+            data_schema=vol.Schema({
+                vol.Required("action"): vol.In({
+                    "alerts": "Modify Alert Settings",
+                    "remove": "Remove Device",
+                }),
+            }),
+        )
+
+    async def async_step_bluetooth_alert_select(self, user_input=None):
+        """Select which Bluetooth device to configure alerts for."""
+        bluetooth_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH]
+        if not bluetooth_targets:
+            return await self.async_step_menu()
+
+        if user_input is not None:
+            self._bluetooth_selected_address = user_input["bt_address"]
+            return await self.async_step_bluetooth_alert_config()
+
+        devices = {
+            t[CONF_BLUETOOTH_ADDRESS]: f"{t.get('device_name', t[CONF_BLUETOOTH_ADDRESS])} ({t[CONF_BLUETOOTH_ADDRESS]})"
+            for t in sorted(bluetooth_targets, key=lambda x: x.get("device_name", ""))
+        }
+        return self.async_show_form(
+            step_id="bluetooth_alert_select",
+            data_schema=vol.Schema({
+                vol.Required("bt_address"): vol.In(devices),
+            }),
+        )
+
+    async def async_step_bluetooth_alert_config(self, user_input=None):
+        """Configure alert settings for the selected Bluetooth device."""
+        notify_groups = await self._async_get_notify_groups()
+        alert_actions = await self._async_get_alert_actions()
+
+        current_target = next(
+            (t for t in self._targets
+             if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH and t.get(CONF_BLUETOOTH_ADDRESS) == self._bluetooth_selected_address),
+            {}
+        )
+        current_alert_group = current_target.get(CONF_ALERT_GROUP, "")
+        current_alert_delay = current_target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+        current_alerts_enabled = bool(current_alert_group)
+        current_alert_action = current_target.get(CONF_ALERT_ACTION, "")
+        current_action_delay = current_target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+        current_action_enabled = bool(current_alert_action)
+
+        if user_input is not None:
+            alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
+            alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
+            action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
+            alert_action = user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            for t in self._targets:
+                if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH and t.get(CONF_BLUETOOTH_ADDRESS) == self._bluetooth_selected_address:
+                    if alert_group:
+                        t[CONF_ALERT_GROUP] = alert_group
+                    else:
+                        t.pop(CONF_ALERT_GROUP, None)
+                    t[CONF_ALERT_DELAY] = user_input[CONF_ALERT_DELAY]
+                    if alert_action:
+                        t[CONF_ALERT_ACTION] = alert_action
+                    else:
+                        t.pop(CONF_ALERT_ACTION, None)
+                    t[CONF_ALERT_ACTION_DELAY] = user_input[CONF_ALERT_ACTION_DELAY]
+
+            self.config_data[CONF_TARGETS] = self._targets
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=self.config_data
+            )
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            return self.async_create_entry(title="", data={})
+
+        notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
+        notify_groups_dict[""] = "No alert group"
+        schema = {
+            vol.Optional(CONF_ALERTS_ENABLED, default=current_alerts_enabled): bool,
+            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(notify_groups_dict),
+            vol.Required(CONF_ALERT_DELAY, default=current_alert_delay): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=60)
+            ),
+            vol.Optional(CONF_ALERT_ACTION_ENABLED, default=current_action_enabled): bool,
+            vol.Required(CONF_ALERT_ACTION_DELAY, default=current_action_delay): vol.All(
+                vol.Coerce(int), vol.Range(min=1, max=120)
+            ),
+        }
+        if alert_actions:
+            actions_dict = {"": "No action"}
+            actions_dict.update(alert_actions)
+            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = vol.In(actions_dict)
+        return self.async_show_form(
+            step_id="bluetooth_alert_config",
+            data_schema=vol.Schema(schema),
+        )
+
+    async def async_step_remove_bluetooth_device(self, user_input=None):
+        """Remove a monitored Bluetooth device."""
+        entity_registry = async_get_entity_registry(self.hass)
+
+        bluetooth_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH]
+        if not bluetooth_targets:
+            return await self.async_step_menu()
+
+        if user_input is not None:
+            bt_address = user_input["bt_address"]
+
+            self._targets = [
+                t for t in self._targets
+                if not (t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH and t.get(CONF_BLUETOOTH_ADDRESS) == bt_address)
+            ]
+
+            bt_address_clean = bt_address.replace("-", "_").replace(":", "_")
+            unique_id = f"connectivity_bluetooth_{bt_address_clean}"
+            entry_entities = async_entries_for_config_entry(
+                entity_registry, self.config_entry.entry_id
+            )
+            for entity_entry in entry_entities:
+                if entity_entry.unique_id == unique_id:
+                    entity_registry.async_remove(entity_entry.entity_id)
+                    break
+
+            self.config_data[CONF_TARGETS] = self._targets
+            self.hass.config_entries.async_update_entry(
+                self.config_entry, data=self.config_data
+            )
+            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            return self.async_create_entry(title="", data={})
+
+        devices = {
+            t[CONF_BLUETOOTH_ADDRESS]: f"{t.get('device_name', t[CONF_BLUETOOTH_ADDRESS])} ({t[CONF_BLUETOOTH_ADDRESS]})"
+            for t in sorted(bluetooth_targets, key=lambda x: x.get("device_name", ""))
+        }
+        return self.async_show_form(
+            step_id="remove_bluetooth_device",
+            data_schema=vol.Schema({
+                vol.Required("bt_address"): vol.In(devices),
+            }),
+        )
+
     async def async_step_esphome_alert_select(self, user_input=None):
         """Select which ESPHome device to configure alerts for."""
         esphome_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME]
@@ -1184,8 +1479,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         """Select which device to rename (network devices only)."""
         devices = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME):
-                continue  # ZHA, Matter and ESPHome devices don't support host renaming
+            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH):
+                continue  # Shared-registry devices don't support host renaming
             device_host = target[CONF_HOST]
             if device_host not in devices:
                 device_name = target.get("device_name", device_host)
@@ -1272,7 +1567,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         # Get unique devices (skip ZHA and Matter targets — they don't use notify groups)
         devices = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME):
+            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH):
                 continue
             device_host = target[CONF_HOST]
             if device_host not in devices:
@@ -1420,7 +1715,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         # Get unique network devices (ZHA/Matter/ESPHome devices are removed via their own step)
         devices = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME):
+            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH):
                 continue
             device_name = target.get("device_name", target[CONF_HOST])
             devices[target[CONF_HOST]] = device_name
@@ -1476,8 +1771,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         # Create list of sensors with readable names (network sensors only)
         sensors = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME):
-                continue  # ZHA/Matter/ESPHome devices are removed via their own steps
+            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH):
+                continue  # Shared-registry devices are removed via their own steps
             device_name = target.get("device_name", target[CONF_HOST])
             if target[CONF_PROTOCOL] in [PROTOCOL_TCP, PROTOCOL_UDP]:
                 sensor_name = f"{device_name} - {target[CONF_PROTOCOL]} {target[CONF_PORT]}"
