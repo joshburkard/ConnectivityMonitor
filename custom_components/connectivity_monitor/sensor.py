@@ -1,9 +1,7 @@
 from __future__ import annotations
 import asyncio
-import re
 from datetime import timedelta
 import logging
-import socket
 from ipaddress import ip_address as _parse_ip_address
 from typing import Any
 from datetime import datetime
@@ -11,13 +9,6 @@ from homeassistant.core import callback
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.const import STATE_UNKNOWN
-
-try:
-    import dns.resolver as dns_resolver
-    HAVE_DNS = True
-except ImportError:
-    dns_resolver = None
-    HAVE_DNS = False
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -63,11 +54,9 @@ from .const import (
     CONF_MATTER_NODE_ID,
     CONF_ESPHOME_DEVICE_ID,
     CONF_BLUETOOTH_ADDRESS,
-    DEFAULT_PING_TIMEOUT,
-    DEFAULT_DNS_SERVER,
-    DEFAULT_INTERVAL,
     AD_DC_PORTS
 )
+from .network import NetworkProbe
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -649,12 +638,7 @@ class ConnectivityMonitorCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=update_interval),
         )
         self.targets = targets
-        self._dns_server = dns_server
-        self._resolver = None
-        self._resolved_ips: dict[str, str | None] = {}
-        self._mac_addresses: dict[str, str | None] = {}
-        self._icmp_privileged: dict[str, bool | None] = {}
-        self._icmp_import_failed = False
+        self._network_probe = NetworkProbe(hass, dns_server)
 
     def get_target_data(self, target: dict) -> dict[str, Any]:
         """Return the last known payload for a specific target."""
@@ -672,7 +656,9 @@ class ConnectivityMonitorCoordinator(DataUpdateCoordinator):
                 PROTOCOL_BLUETOOTH,
             )
         }
-        await asyncio.gather(*(self._async_prepare_host(host) for host in network_hosts))
+        await asyncio.gather(
+            *(self._network_probe.async_prepare_host(host) for host in network_hosts)
+        )
 
         results = await asyncio.gather(
             *(self._async_update_target(target) for target in self.targets),
@@ -710,7 +696,7 @@ class ConnectivityMonitorCoordinator(DataUpdateCoordinator):
         """Dispatch a target update to the protocol-specific probe."""
         protocol = target[CONF_PROTOCOL]
         if protocol in (PROTOCOL_TCP, PROTOCOL_UDP, PROTOCOL_ICMP, PROTOCOL_AD_DC):
-            return await self._async_update_network_target(target)
+            return await self._network_probe.async_update_target(target)
         if protocol == PROTOCOL_ZHA:
             return await self._async_update_zha_target(target)
         if protocol == PROTOCOL_MATTER:
@@ -722,53 +708,6 @@ class ConnectivityMonitorCoordinator(DataUpdateCoordinator):
 
         _LOGGER.warning("Unsupported protocol '%s' for target %s", protocol, target)
         return self._default_result_for(target)
-
-    async def _async_prepare_host(self, host: str) -> None:
-        """Populate cached resolution and MAC data for a network host."""
-        if host not in self._resolved_ips:
-            self._resolved_ips[host] = await self._resolve_host(host)
-
-        resolved_ip = self._resolved_ips.get(host)
-        if resolved_ip and resolved_ip not in self._mac_addresses:
-            self._mac_addresses[resolved_ip] = await self._get_mac_address(resolved_ip)
-
-    async def _async_update_network_target(self, target: dict) -> dict[str, Any]:
-        """Probe a TCP/UDP/ICMP network target."""
-        host = target[CONF_HOST]
-        protocol = target[CONF_PROTOCOL]
-        result = self._default_result_for(target)
-
-        try:
-            await self._async_prepare_host(host)
-            resolved_ip = self._resolved_ips.get(host)
-            if not resolved_ip:
-                _LOGGER.error("Could not resolve hostname %s", host)
-                return result
-
-            result["resolved_ip"] = resolved_ip
-            result["mac_address"] = self._mac_addresses.get(resolved_ip)
-
-            if protocol in (PROTOCOL_TCP, PROTOCOL_AD_DC):
-                latency = await self._async_test_tcp(resolved_ip, target[CONF_PORT])
-            elif protocol == PROTOCOL_UDP:
-                latency = await self._async_test_udp(resolved_ip, target[CONF_PORT])
-            else:
-                latency = await self._async_icmp_ping(host, resolved_ip)
-
-            if latency is not None:
-                result["connected"] = True
-                result["latency"] = round(latency, 2)
-
-            return result
-        except Exception as err:
-            _LOGGER.error(
-                "Update failed for %s:%s (%s): %s",
-                host,
-                target.get(CONF_PORT, "N/A"),
-                protocol,
-                err,
-            )
-            return result
 
     async def _async_update_zha_target(self, target: dict) -> dict[str, Any]:
         """Fetch last_seen and activity state for a ZHA device."""
@@ -816,174 +755,6 @@ class ConnectivityMonitorCoordinator(DataUpdateCoordinator):
         from .bluetooth import async_get_bluetooth_device_details
 
         return await async_get_bluetooth_device_details(self.hass, target[CONF_BLUETOOTH_ADDRESS])
-
-    async def _async_test_tcp(self, resolved_ip: str, port: int) -> float | None:
-        """Open a TCP connection and return latency in milliseconds."""
-        try:
-            start_time = self.hass.loop.time()
-            _reader, writer = await asyncio.wait_for(
-                asyncio.open_connection(resolved_ip, port),
-                timeout=5,
-            )
-            latency = (self.hass.loop.time() - start_time) * 1000
-            writer.close()
-            await writer.wait_closed()
-            return latency
-        except Exception as err:
-            _LOGGER.debug("TCP connection failed for %s:%s: %s", resolved_ip, port, err)
-            return None
-
-    async def _async_test_udp(self, resolved_ip: str, port: int) -> float | None:
-        """Open a UDP socket and return latency in milliseconds."""
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            start_time = self.hass.loop.time()
-            sock.settimeout(5)
-            await self.hass.async_add_executor_job(sock.connect, (resolved_ip, port))
-            return (self.hass.loop.time() - start_time) * 1000
-        except Exception as err:
-            _LOGGER.debug("UDP connection failed for %s:%s: %s", resolved_ip, port, err)
-            return None
-        finally:
-            sock.close()
-
-    async def _async_icmp_ping(self, host: str, ip_address: str) -> float | None:
-        """Ping a host using Home Assistant's built-in ICMP approach."""
-        try:
-            from icmplib import NameLookupError, SocketPermissionError, async_ping
-        except ImportError as err:
-            if not self._icmp_import_failed:
-                _LOGGER.error(
-                    "ICMP support is unavailable because icmplib is not installed. "
-                    "Restart Home Assistant so the updated integration requirements can be installed: %s",
-                    err,
-                )
-                self._icmp_import_failed = True
-            return None
-
-        privileged = self._icmp_privileged.get(host, True)
-        try:
-            response = await async_ping(
-                ip_address,
-                count=2,
-                timeout=DEFAULT_PING_TIMEOUT,
-                privileged=privileged,
-            )
-        except SocketPermissionError:
-            if privileged is True:
-                _LOGGER.debug(
-                    "ICMP raw socket not permitted for %s, retrying unprivileged",
-                    ip_address,
-                )
-                self._icmp_privileged[host] = False
-                return await self._async_icmp_ping(host, ip_address)
-
-            _LOGGER.debug("ICMP socket permission denied for %s", ip_address)
-            return None
-        except NameLookupError:
-            _LOGGER.debug("ICMP lookup failed for %s", ip_address)
-            return None
-        except Exception as err:
-            _LOGGER.debug("ICMP ping failed for %s: %s", ip_address, err)
-            return None
-
-        self._icmp_privileged[host] = privileged
-        if not response.is_alive or response.avg_rtt is None:
-            return None
-
-        return float(response.avg_rtt)
-
-    async def _get_mac_address(self, ip: str) -> str | None:
-        """Get MAC address for an IP."""
-        try:
-            cmd = "arp -n" if not hasattr(socket, "AF_HYPERV") else "arp -a"
-            proc = await asyncio.create_subprocess_shell(
-                f"{cmd} {ip}",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await proc.communicate()
-            output = stdout.decode()
-
-            mac_match = re.search(r"([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})", output)
-            if mac_match:
-                return mac_match.group(0).upper().replace("-", ":")
-
-            _LOGGER.debug("No MAC address found in ARP for IP %s", ip)
-            return None
-        except Exception as err:
-            _LOGGER.error("Error getting MAC address for %s: %s", ip, err)
-            return None
-
-    async def _get_resolver(self):
-        """Get a DNS resolver in executor."""
-        if not HAVE_DNS or dns_resolver is None:
-            return None
-
-        resolver_module = dns_resolver
-
-        if self._resolver is None:
-            def _create_resolver():
-                resolver = resolver_module.Resolver()
-                resolver.nameservers = [self._dns_server]
-                resolver.timeout = 2
-                resolver.lifetime = 4
-                return resolver
-
-            self._resolver = await self.hass.async_add_executor_job(_create_resolver)
-
-        return self._resolver
-
-    async def _resolve_host(self, hostname: str) -> str | None:
-        """Resolve hostname to IP address using configured DNS server."""
-        try:
-            try:
-                socket.inet_pton(socket.AF_INET, hostname)
-                return hostname
-            except (socket.error, ValueError):
-                pass
-
-            try:
-                socket.inet_pton(socket.AF_INET6, hostname)
-                return hostname
-            except (socket.error, ValueError):
-                pass
-
-            resolver = await self._get_resolver()
-            if resolver is None:
-                _LOGGER.debug("DNS resolver unavailable for host %s", hostname)
-                return None
-
-            def _do_resolve():
-                try:
-                    answers = resolver.resolve(hostname, "A")
-                    if answers:
-                        return str(answers[0])
-                    return None
-                except Exception as err:
-                    _LOGGER.debug("DNS resolution failed: %s", err)
-                    return None
-
-            result = await self.hass.async_add_executor_job(_do_resolve)
-
-            if result:
-                _LOGGER.debug(
-                    "Resolved %s to %s using DNS server %s",
-                    hostname,
-                    result,
-                    self._dns_server,
-                )
-                return result
-
-            _LOGGER.warning(
-                "Could not resolve %s using DNS server %s",
-                hostname,
-                self._dns_server,
-            )
-            return None
-        except Exception as err:
-            _LOGGER.error("Error resolving hostname %s: %s", hostname, err)
-            return None
 
 
 class ConnectivityMonitorEntity(CoordinatorEntity):

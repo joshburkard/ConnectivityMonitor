@@ -1,3 +1,4 @@
 all-files
 merge-files.ps1
 test\
+custom_components/connectivity_monitor/__pycache__
