@@ -93,9 +93,7 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up the Connectivity Monitor component."""
     hass.data.setdefault(DOMAIN, {})
 
-    card_url = "/connectivity_monitor_panel/connectivity-monitor-card.js"
-
-    # Serve www/ folder so the card JS is reachable via HTTP
+    # Serve www/ folder and inject card script
     try:
         from homeassistant.components.http import StaticPathConfig
         await hass.http.async_register_static_paths(
@@ -105,28 +103,10 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
                 cache_headers=False,
             )]
         )
+        from homeassistant.components.frontend import add_extra_js_url
+        add_extra_js_url(hass, "/connectivity_monitor_panel/connectivity-monitor-card.js")
     except Exception as err:
-        _LOGGER.warning("Connectivity Monitor: could not register static path: %s", err)
-
-    # Register card as a Lovelace resource (same as Settings > Dashboards > Resources).
-    # Must run after HA is fully started so the lovelace storage is available.
-    async def _register_lovelace_resource(_event=None):
-        try:
-            ll = hass.data.get("lovelace")
-            if ll is None:
-                return
-            resources = getattr(ll, "resources", None)
-            if resources is None:
-                return
-            await resources.async_load()
-            if any(r.get("url") == card_url for r in resources.async_items()):
-                return
-            await resources.async_create_item({"res_type": "module", "url": card_url})
-            _LOGGER.info("Connectivity Monitor: Lovelace resource registered")
-        except Exception as err:
-            _LOGGER.warning("Connectivity Monitor: could not register Lovelace resource: %s", err)
-
-    hass.bus.async_listen_once("homeassistant_started", _register_lovelace_resource)
+        _LOGGER.warning("Connectivity Monitor: frontend setup failed: %s", err)
 
     return True
 
