@@ -1,22 +1,18 @@
 """Constants for the Connectivity Monitor integration."""
+
 import json
 import os
-from datetime import timedelta
 
 DOMAIN = "connectivity_monitor"
 
 # Load version from manifest.json
 MANIFEST_PATH = os.path.join(os.path.dirname(__file__), "manifest.json")
 try:
-    with open(MANIFEST_PATH) as manifest_file:
+    with open(MANIFEST_PATH, encoding="utf-8") as manifest_file:
         manifest = json.load(manifest_file)
         VERSION = manifest.get("version", "0.0.0")
-except Exception as err:
+except OSError, ValueError, KeyError:
     VERSION = "0.0.0"
-
-from datetime import timedelta
-
-DOMAIN = "connectivity_monitor"
 
 DEFAULT_PORT = 80
 DEFAULT_PROTOCOL = "TCP"
@@ -43,12 +39,18 @@ DEFAULT_ALERT_ACTION_DELAY = 30
 PROTOCOL_TCP = "TCP"
 PROTOCOL_UDP = "UDP"
 PROTOCOL_ICMP = "ICMP"
-PROTOCOL_RPC = "RPC"
 PROTOCOL_AD_DC = "AD_DC"
 PROTOCOL_ZHA = "ZHA"
 PROTOCOL_MATTER = "MATTER"
 PROTOCOL_ESPHOME = "ESPHOME"
 PROTOCOL_BLUETOOTH = "BLUETOOTH"
+
+NON_NETWORK_PROTOCOLS = (
+    PROTOCOL_ZHA,
+    PROTOCOL_MATTER,
+    PROTOCOL_ESPHOME,
+    PROTOCOL_BLUETOOTH,
+)
 
 PROTOCOLS = [PROTOCOL_TCP, PROTOCOL_UDP, PROTOCOL_ICMP, PROTOCOL_AD_DC]
 # ZHA / ZigBee device monitoring
@@ -65,9 +67,6 @@ CONF_ESPHOME_DEVICE_ID = "esphome_device_id"
 # Bluetooth device monitoring
 CONF_BLUETOOTH_ADDRESS = "bt_address"
 
-# Default RPC ports
-RPC_DEFAULT_PORTS = [111, 135, 139, 445]
-
 # Default Active Directory ports
 AD_DC_PORTS = {
     88: "Kerberos",
@@ -77,5 +76,5 @@ AD_DC_PORTS = {
     464: "Kerberos Password Change",
     636: "LDAPS",
     3268: "Global Catalog",
-    3269: "Global Catalog SSL"
+    3269: "Global Catalog SSL",
 }

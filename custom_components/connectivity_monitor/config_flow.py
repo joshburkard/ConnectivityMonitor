@@ -1,59 +1,69 @@
 """Config flow for Connectivity Monitor integration."""
+
 from __future__ import annotations
 
+from ipaddress import IPv4Address, ip_address
 import logging
+from typing import Any
+
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.config_entries import ConfigEntry, ConfigFlowResult, OptionsFlow
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import callback
-import homeassistant.helpers.config_validation as cv
-from ipaddress import ip_address, IPv4Address
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
-from homeassistant.helpers.entity_registry import (
-    async_entries_for_config_entry,
-    async_get as async_get_entity_registry,
-)
-from homeassistant.helpers.device_registry import async_get as async_get_device_registry
-
+from .bluetooth import async_get_bluetooth_devices
 from .const import (
-    DOMAIN,
-    DEFAULT_PORT,
-    DEFAULT_PROTOCOL,
-    DEFAULT_INTERVAL,
-    DEFAULT_ALERT_DELAY,
-    CONF_PROTOCOL,
-    CONF_INTERVAL,
-    CONF_TARGETS,
-    CONF_DNS_SERVER,
-    CONF_ALERT_GROUP,
-    CONF_ALERT_DELAY,
-    CONF_ALERTS_ENABLED,
-    CONF_ALERT_ACTION_ENABLED,
+    AD_DC_PORTS,
     CONF_ALERT_ACTION,
     CONF_ALERT_ACTION_DELAY,
+    CONF_ALERT_ACTION_ENABLED,
+    CONF_ALERT_DELAY,
+    CONF_ALERT_GROUP,
+    CONF_ALERTS_ENABLED,
+    CONF_BLUETOOTH_ADDRESS,
+    CONF_DNS_SERVER,
+    CONF_ESPHOME_DEVICE_ID,
+    CONF_INACTIVE_TIMEOUT,
+    CONF_INTERVAL,
+    CONF_MATTER_NODE_ID,
+    CONF_PROTOCOL,
+    CONF_TARGETS,
+    CONF_ZHA_IEEE,
     DEFAULT_ALERT_ACTION_DELAY,
-    DEFAULT_DNS_SERVER,
+    DEFAULT_ALERT_DELAY,
     DEFAULT_ALERT_GROUP,
-    PROTOCOLS,
-    PROTOCOL_ICMP,
+    DEFAULT_DNS_SERVER,
+    DEFAULT_INACTIVE_TIMEOUT,
+    DEFAULT_INTERVAL,
+    DEFAULT_PORT,
+    DEFAULT_PROTOCOL,
+    DOMAIN,
     PROTOCOL_AD_DC,
+    PROTOCOL_BLUETOOTH,
+    PROTOCOL_ESPHOME,
+    PROTOCOL_ICMP,
+    PROTOCOL_MATTER,
     PROTOCOL_TCP,
     PROTOCOL_UDP,
     PROTOCOL_ZHA,
-    PROTOCOL_MATTER,
-    PROTOCOL_ESPHOME,
-    PROTOCOL_BLUETOOTH,
-    CONF_ZHA_IEEE,
-    CONF_INACTIVE_TIMEOUT,
-    DEFAULT_INACTIVE_TIMEOUT,
-    CONF_MATTER_NODE_ID,
-    CONF_ESPHOME_DEVICE_ID,
-    CONF_BLUETOOTH_ADDRESS,
-    AD_DC_PORTS
 )
+from .esphome import async_get_esphome_devices
+from .matter import async_get_matter_devices
+from .network import NetworkProbe
+from .zha import async_get_zha_devices
 
 _LOGGER = logging.getLogger(__name__)
+
+NETWORK_PROTOCOLS = {
+    PROTOCOL_TCP,
+    PROTOCOL_UDP,
+    PROTOCOL_ICMP,
+    PROTOCOL_AD_DC,
+}
+
 
 def is_valid_ip(ip: str) -> bool:
     """Check if string is valid IP address."""
@@ -62,8 +72,10 @@ def is_valid_ip(ip: str) -> bool:
     except ValueError:
         return False
 
+
 class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Connectivity Monitor."""
+
     VERSION = 2
 
     # Unique IDs and titles for each typed entry
@@ -82,9 +94,9 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         "zha": "ZigBee Monitor",
     }
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the config flow."""
-        self._data = {}
+        self._data: dict[str, Any] = {}
         # ZHA device selection state (reused across main and options flows)
         self._zha_selected_ieee: str | None = None
         self._zha_selected_name: str | None = None
@@ -110,15 +122,16 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry):
+    def async_get_options_flow(
+        config_entry: ConfigEntry,
+    ) -> OptionsFlow:
         """Get the options flow for this handler."""
         return OptionsFlowHandler()
 
     async def _async_get_notify_groups(self):
         """Get list of notification groups from Home Assistant."""
         notify_services = self.hass.services.async_services().get("notify", {})
-        groups = {name: name.replace("notify.", "") for name in notify_services.keys()}
-        return groups
+        return {name: name.replace("notify.", "") for name in notify_services}
 
     async def _async_get_alert_actions(self):
         """Get available automations and scripts that can be triggered as alert actions."""
@@ -131,10 +144,52 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 actions[entity_id] = f"{name} ({entity_id})"
         return dict(sorted(actions.items(), key=lambda x: x[1].lower()))
 
-    async def async_step_import(self, data):
+    async def _async_validate_network_target(self) -> bool:
+        """Check that the configured network target can be reached before setup."""
+        protocol = self._data.get(CONF_PROTOCOL)
+        host = self._data.get(CONF_HOST)
+        if protocol not in NETWORK_PROTOCOLS or not host:
+            return True
+
+        probe = NetworkProbe(
+            self.hass,
+            self._data.get(CONF_DNS_SERVER, DEFAULT_DNS_SERVER),
+        )
+
+        if protocol == PROTOCOL_AD_DC:
+            validation_targets = [
+                {
+                    CONF_HOST: host,
+                    CONF_PROTOCOL: PROTOCOL_TCP,
+                    CONF_PORT: port,
+                }
+                for port in AD_DC_PORTS
+            ]
+        else:
+            validation_target = {
+                CONF_HOST: host,
+                CONF_PROTOCOL: protocol,
+            }
+            if protocol in (PROTOCOL_TCP, PROTOCOL_UDP):
+                validation_target[CONF_PORT] = self._data[CONF_PORT]
+            validation_targets = [validation_target]
+
+        try:
+            for validation_target in validation_targets:
+                result = await probe.async_update_target(validation_target)
+                if result.get("connected"):
+                    return True
+        except (KeyError, OSError, ValueError) as err:
+            _LOGGER.debug("Network validation failed for %s: %s", host, err)
+
+        return False
+
+    async def async_step_import(self, data) -> ConfigFlowResult:
         """Handle import from automated migration — creates a typed entry directly."""
         entry_type = data.get("entry_type", "network")
-        unique_id = self.ENTRY_UNIQUE_IDS.get(entry_type, f"connectivity_monitor_{entry_type}")
+        unique_id = self.ENTRY_UNIQUE_IDS.get(
+            entry_type, f"connectivity_monitor_{entry_type}"
+        )
         await self.async_set_unique_id(unique_id)
         self._abort_if_unique_id_configured()
         return self.async_create_entry(
@@ -146,7 +201,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    async def async_step_user(self, user_input=None):
+    async def async_step_user(self, user_input=None) -> ConfigFlowResult:
         """Handle a flow initiated by the user — choose device type."""
         # Copy shared settings (interval, DNS) from any existing entry but do NOT
         # pre-populate targets — each device type now lives in its own typed entry.
@@ -162,61 +217,77 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             if user_input["device_type"] == "zha":
                 return await self.async_step_zha_device()
-            elif user_input["device_type"] == "matter":
+            if user_input["device_type"] == "matter":
                 return await self.async_step_matter_device()
-            elif user_input["device_type"] == "esphome":
+            if user_input["device_type"] == "esphome":
                 return await self.async_step_esphome_device()
-            elif user_input["device_type"] == "bluetooth":
+            if user_input["device_type"] == "bluetooth":
                 return await self.async_step_bluetooth_device()
-            else:
-                return await self.async_step_network()
+            return await self.async_step_network()
 
         return self.async_show_form(
             step_id="user",
-            data_schema=vol.Schema({
-                vol.Required("device_type", default="network"): vol.In({
-                    "bluetooth": "Bluetooth Device",
-                    "esphome": "ESPHome Device",
-                    "matter": "Matter Device",
-                    "network": "Network Device (TCP / UDP / ICMP / AD)",
-                    "zha": "ZigBee Device (ZHA)",
-                }),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device_type", default="network"): vol.In(
+                        {
+                            "bluetooth": "Bluetooth Device",
+                            "esphome": "ESPHome Device",
+                            "matter": "Matter Device",
+                            "network": "Network Device (TCP / UDP / ICMP / AD)",
+                            "zha": "ZigBee Device (ZHA)",
+                        }
+                    ),
+                }
+            ),
         )
 
-    async def async_step_network(self, user_input=None):
+    async def async_step_network(self, user_input=None) -> ConfigFlowResult:
         """Configure a network device to monitor."""
         errors = {}
         entries = self._async_current_entries()
 
         if user_input is not None:
             try:
-                self._data.update({
-                    CONF_HOST: user_input[CONF_HOST],
-                    CONF_PROTOCOL: user_input[CONF_PROTOCOL],
-                    "device_name": user_input.get("device_name", ""),
-                    CONF_ALERTS_ENABLED: user_input.get(CONF_ALERTS_ENABLED, False),
-                    CONF_ALERT_GROUP: (
-                        user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
-                    ) if user_input.get(CONF_ALERTS_ENABLED) else DEFAULT_ALERT_GROUP,
-                    CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
-                    CONF_ALERT_ACTION_ENABLED: user_input.get(CONF_ALERT_ACTION_ENABLED, False),
-                    CONF_ALERT_ACTION: (
-                        user_input.get(CONF_ALERT_ACTION, "") or ""
-                    ) if user_input.get(CONF_ALERT_ACTION_ENABLED) else "",
-                    CONF_ALERT_ACTION_DELAY: user_input.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
-                })
+                self._data.update(
+                    {
+                        CONF_HOST: user_input[CONF_HOST],
+                        CONF_PROTOCOL: user_input[CONF_PROTOCOL],
+                        "device_name": user_input.get("device_name", ""),
+                        CONF_ALERTS_ENABLED: user_input.get(CONF_ALERTS_ENABLED, False),
+                        CONF_ALERT_GROUP: (
+                            user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
+                        )
+                        if user_input.get(CONF_ALERTS_ENABLED)
+                        else DEFAULT_ALERT_GROUP,
+                        CONF_ALERT_DELAY: user_input.get(
+                            CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY
+                        ),
+                        CONF_ALERT_ACTION_ENABLED: user_input.get(
+                            CONF_ALERT_ACTION_ENABLED, False
+                        ),
+                        CONF_ALERT_ACTION: (user_input.get(CONF_ALERT_ACTION, "") or "")
+                        if user_input.get(CONF_ALERT_ACTION_ENABLED)
+                        else "",
+                        CONF_ALERT_ACTION_DELAY: user_input.get(
+                            CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+                        ),
+                    }
+                )
 
                 protocol = self._data[CONF_PROTOCOL]
                 if protocol in [PROTOCOL_TCP, PROTOCOL_UDP]:
                     return await self.async_step_port()
-                elif not entries:
+                if not entries:
                     return await self.async_step_dns()
+            except Exception:
+                _LOGGER.exception("Error in network step")
+                errors["base"] = "unknown"
+            else:
+                if not await self._async_validate_network_target():
+                    errors["base"] = "cannot_connect"
                 else:
                     return await self.async_step_finish()
-            except Exception as ex:
-                _LOGGER.exception("Error in network step: %s", ex)
-                errors["base"] = "unknown"
 
         notify_groups = await self._async_get_notify_groups()
         alert_actions = await self._async_get_alert_actions()
@@ -224,12 +295,14 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         schema = {
             vol.Required(CONF_HOST): str,
             vol.Optional("device_name", description={"suggested_value": ""}): str,
-            vol.Required(CONF_PROTOCOL, default=DEFAULT_PROTOCOL): vol.In({
-                PROTOCOL_TCP: "TCP (Custom Port)",
-                PROTOCOL_UDP: "UDP (Custom Port)",
-                PROTOCOL_ICMP: "ICMP (Ping)",
-                PROTOCOL_AD_DC: "Active Directory DC",
-            }),
+            vol.Required(CONF_PROTOCOL, default=DEFAULT_PROTOCOL): vol.In(
+                {
+                    PROTOCOL_TCP: "TCP (Custom Port)",
+                    PROTOCOL_UDP: "UDP (Custom Port)",
+                    PROTOCOL_ICMP: "ICMP (Ping)",
+                    PROTOCOL_AD_DC: "Active Directory DC",
+                }
+            ),
             vol.Optional(CONF_ALERTS_ENABLED, default=False): bool,
             vol.Required(CONF_ALERT_DELAY, default=DEFAULT_ALERT_DELAY): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
@@ -239,14 +312,16 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if notify_groups:
             notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
             notify_groups_dict[""] = "No alert group"
-            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
+            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(
+                notify_groups_dict
+            )
 
         schema[vol.Optional(CONF_ALERT_ACTION_ENABLED, default=False)] = bool
-        schema[vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)] = vol.All(
-            vol.Coerce(int), vol.Range(min=1, max=120)
-        )
+        schema[
+            vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)
+        ] = vol.All(vol.Coerce(int), vol.Range(min=1, max=120))
         if alert_actions:
-            actions_dict = {"" : "No action"}
+            actions_dict = {"": "No action"}
             actions_dict.update(alert_actions)
             schema[vol.Optional(CONF_ALERT_ACTION, default="")] = vol.In(actions_dict)
 
@@ -256,10 +331,8 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             errors=errors,
         )
 
-    async def async_step_zha_device(self, user_input=None):
+    async def async_step_zha_device(self, user_input=None) -> ConfigFlowResult:
         """Select a ZHA device to add to monitoring (main config flow)."""
-        from .zha import async_get_zha_devices
-
         entries = self._async_current_entries()
         zha_entry = next(
             (e for e in entries if e.unique_id == self.ENTRY_UNIQUE_IDS["zha"]), None
@@ -302,17 +375,21 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         return self.async_show_form(
             step_id="zha_device",
-            data_schema=vol.Schema({
-                vol.Required(CONF_ZHA_IEEE): vol.In(device_choices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ZHA_IEEE): vol.In(device_choices),
+                }
+            ),
         )
 
-    async def async_step_zha_configure(self, user_input=None):
+    async def async_step_zha_configure(self, user_input=None) -> ConfigFlowResult:
         """Set device name, inactivity timeout, and alert settings for the selected ZHA device."""
         entries = self._async_current_entries()
 
         if user_input is not None:
-            device_name = (user_input.get("device_name") or "").strip() or self._zha_selected_name
+            device_name = (
+                user_input.get("device_name") or ""
+            ).strip() or self._zha_selected_name
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
             new_target = {
@@ -323,12 +400,16 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_INACTIVE_TIMEOUT: user_input[CONF_INACTIVE_TIMEOUT],
                 CONF_ALERT_GROUP: (
                     user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
-                ) if alerts_enabled else DEFAULT_ALERT_GROUP,
+                )
+                if alerts_enabled
+                else DEFAULT_ALERT_GROUP,
                 CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
-                CONF_ALERT_ACTION: (
-                    user_input.get(CONF_ALERT_ACTION, "") or ""
-                ) if action_enabled else "",
-                CONF_ALERT_ACTION_DELAY: user_input.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
+                CONF_ALERT_ACTION: (user_input.get(CONF_ALERT_ACTION, "") or "")
+                if action_enabled
+                else "",
+                CONF_ALERT_ACTION_DELAY: user_input.get(
+                    CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+                ),
             }
             if self._zha_selected_model:
                 new_target["model"] = self._zha_selected_model
@@ -349,9 +430,9 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         alert_actions = await self._async_get_alert_actions()
         schema = {
             vol.Optional("device_name", default=self._zha_selected_name or ""): str,
-            vol.Required(CONF_INACTIVE_TIMEOUT, default=DEFAULT_INACTIVE_TIMEOUT): vol.All(
-                vol.Coerce(int), vol.Range(min=5, max=1440)
-            ),
+            vol.Required(
+                CONF_INACTIVE_TIMEOUT, default=DEFAULT_INACTIVE_TIMEOUT
+            ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
             vol.Optional(CONF_ALERTS_ENABLED, default=False): bool,
             vol.Required(CONF_ALERT_DELAY, default=DEFAULT_ALERT_DELAY): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
@@ -360,13 +441,15 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if notify_groups:
             notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
             notify_groups_dict[""] = "No alert group"
-            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
+            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(
+                notify_groups_dict
+            )
         schema[vol.Optional(CONF_ALERT_ACTION_ENABLED, default=False)] = bool
-        schema[vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)] = vol.All(
-            vol.Coerce(int), vol.Range(min=1, max=120)
-        )
+        schema[
+            vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)
+        ] = vol.All(vol.Coerce(int), vol.Range(min=1, max=120))
         if alert_actions:
-            actions_dict = {"" : "No action"}
+            actions_dict = {"": "No action"}
             actions_dict.update(alert_actions)
             schema[vol.Optional(CONF_ALERT_ACTION, default="")] = vol.In(actions_dict)
 
@@ -379,10 +462,8 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    async def async_step_matter_device(self, user_input=None):
+    async def async_step_matter_device(self, user_input=None) -> ConfigFlowResult:
         """Select a Matter device to add to monitoring (main config flow)."""
-        from .matter import async_get_matter_devices
-
         entries = self._async_current_entries()
         matter_entry = next(
             (e for e in entries if e.unique_id == self.ENTRY_UNIQUE_IDS["matter"]), None
@@ -412,9 +493,16 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._matter_selected_node_id = user_input[CONF_MATTER_NODE_ID]
             matched = next(
-                (d for d in matter_devices if d["node_id"] == self._matter_selected_node_id), {}
+                (
+                    d
+                    for d in matter_devices
+                    if d["node_id"] == self._matter_selected_node_id
+                ),
+                {},
             )
-            self._matter_selected_name = matched.get("name") or self._matter_selected_node_id
+            self._matter_selected_name = (
+                matched.get("name") or self._matter_selected_node_id
+            )
             self._matter_selected_model = matched.get("model")
             self._matter_selected_manufacturer = matched.get("manufacturer")
             return await self.async_step_matter_configure()
@@ -425,17 +513,21 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         return self.async_show_form(
             step_id="matter_device",
-            data_schema=vol.Schema({
-                vol.Required(CONF_MATTER_NODE_ID): vol.In(device_choices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_MATTER_NODE_ID): vol.In(device_choices),
+                }
+            ),
         )
 
-    async def async_step_matter_configure(self, user_input=None):
+    async def async_step_matter_configure(self, user_input=None) -> ConfigFlowResult:
         """Set device name, inactivity timeout, and alert settings for the selected Matter device."""
         entries = self._async_current_entries()
 
         if user_input is not None:
-            device_name = (user_input.get("device_name") or "").strip() or self._matter_selected_name
+            device_name = (
+                user_input.get("device_name") or ""
+            ).strip() or self._matter_selected_name
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
             new_target = {
@@ -445,12 +537,16 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "device_name": device_name,
                 CONF_ALERT_GROUP: (
                     user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
-                ) if alerts_enabled else DEFAULT_ALERT_GROUP,
+                )
+                if alerts_enabled
+                else DEFAULT_ALERT_GROUP,
                 CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
-                CONF_ALERT_ACTION: (
-                    user_input.get(CONF_ALERT_ACTION, "") or ""
-                ) if action_enabled else "",
-                CONF_ALERT_ACTION_DELAY: user_input.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
+                CONF_ALERT_ACTION: (user_input.get(CONF_ALERT_ACTION, "") or "")
+                if action_enabled
+                else "",
+                CONF_ALERT_ACTION_DELAY: user_input.get(
+                    CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+                ),
             }
             if self._matter_selected_model:
                 new_target["model"] = self._matter_selected_model
@@ -478,13 +574,15 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if notify_groups:
             notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
             notify_groups_dict[""] = "No alert group"
-            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
+            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(
+                notify_groups_dict
+            )
         schema[vol.Optional(CONF_ALERT_ACTION_ENABLED, default=False)] = bool
-        schema[vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)] = vol.All(
-            vol.Coerce(int), vol.Range(min=1, max=120)
-        )
+        schema[
+            vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)
+        ] = vol.All(vol.Coerce(int), vol.Range(min=1, max=120))
         if alert_actions:
-            actions_dict = {"" : "No action"}
+            actions_dict = {"": "No action"}
             actions_dict.update(alert_actions)
             schema[vol.Optional(CONF_ALERT_ACTION, default="")] = vol.In(actions_dict)
 
@@ -497,13 +595,12 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    async def async_step_esphome_device(self, user_input=None):
+    async def async_step_esphome_device(self, user_input=None) -> ConfigFlowResult:
         """Select an ESPHome device to add to monitoring (main config flow)."""
-        from .esphome import async_get_esphome_devices
-
         entries = self._async_current_entries()
         esphome_entry = next(
-            (e for e in entries if e.unique_id == self.ENTRY_UNIQUE_IDS["esphome"]), None
+            (e for e in entries if e.unique_id == self.ENTRY_UNIQUE_IDS["esphome"]),
+            None,
         )
         existing_device_ids = {
             t.get(CONF_ESPHOME_DEVICE_ID)
@@ -519,7 +616,9 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data_schema=vol.Schema({}),
             )
 
-        available = [d for d in esphome_devices if d["device_id"] not in existing_device_ids]
+        available = [
+            d for d in esphome_devices if d["device_id"] not in existing_device_ids
+        ]
         if not available:
             return self.async_show_form(
                 step_id="esphome_device",
@@ -530,9 +629,16 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._esphome_selected_device_id = user_input[CONF_ESPHOME_DEVICE_ID]
             matched = next(
-                (d for d in esphome_devices if d["device_id"] == self._esphome_selected_device_id), {}
+                (
+                    d
+                    for d in esphome_devices
+                    if d["device_id"] == self._esphome_selected_device_id
+                ),
+                {},
             )
-            self._esphome_selected_name = matched.get("name") or self._esphome_selected_device_id
+            self._esphome_selected_name = (
+                matched.get("name") or self._esphome_selected_device_id
+            )
             self._esphome_selected_model = matched.get("model")
             self._esphome_selected_manufacturer = matched.get("manufacturer")
             self._esphome_selected_identifier = matched.get("esphome_identifier")
@@ -545,17 +651,21 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         return self.async_show_form(
             step_id="esphome_device",
-            data_schema=vol.Schema({
-                vol.Required(CONF_ESPHOME_DEVICE_ID): vol.In(device_choices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_ESPHOME_DEVICE_ID): vol.In(device_choices),
+                }
+            ),
         )
 
-    async def async_step_esphome_configure(self, user_input=None):
+    async def async_step_esphome_configure(self, user_input=None) -> ConfigFlowResult:
         """Set device name and alert settings for the selected ESPHome device."""
         entries = self._async_current_entries()
 
         if user_input is not None:
-            device_name = (user_input.get("device_name") or "").strip() or self._esphome_selected_name
+            device_name = (
+                user_input.get("device_name") or ""
+            ).strip() or self._esphome_selected_name
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
             new_target = {
@@ -567,12 +677,16 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "device_name": device_name,
                 CONF_ALERT_GROUP: (
                     user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
-                ) if alerts_enabled else DEFAULT_ALERT_GROUP,
+                )
+                if alerts_enabled
+                else DEFAULT_ALERT_GROUP,
                 CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
-                CONF_ALERT_ACTION: (
-                    user_input.get(CONF_ALERT_ACTION, "") or ""
-                ) if action_enabled else "",
-                CONF_ALERT_ACTION_DELAY: user_input.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
+                CONF_ALERT_ACTION: (user_input.get(CONF_ALERT_ACTION, "") or "")
+                if action_enabled
+                else "",
+                CONF_ALERT_ACTION_DELAY: user_input.get(
+                    CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+                ),
             }
             if self._esphome_selected_model:
                 new_target["model"] = self._esphome_selected_model
@@ -600,13 +714,15 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if notify_groups:
             notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
             notify_groups_dict[""] = "No alert group"
-            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
+            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(
+                notify_groups_dict
+            )
         schema[vol.Optional(CONF_ALERT_ACTION_ENABLED, default=False)] = bool
-        schema[vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)] = vol.All(
-            vol.Coerce(int), vol.Range(min=1, max=120)
-        )
+        schema[
+            vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)
+        ] = vol.All(vol.Coerce(int), vol.Range(min=1, max=120))
         if alert_actions:
-            actions_dict = {"" : "No action"}
+            actions_dict = {"": "No action"}
             actions_dict.update(alert_actions)
             schema[vol.Optional(CONF_ALERT_ACTION, default="")] = vol.In(actions_dict)
 
@@ -619,17 +735,18 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    async def async_step_bluetooth_device(self, user_input=None):
+    async def async_step_bluetooth_device(self, user_input=None) -> ConfigFlowResult:
         """Select a Bluetooth device to add to monitoring (main config flow)."""
-        from .bluetooth import async_get_bluetooth_devices
-
         entries = self._async_current_entries()
         bluetooth_entry = next(
-            (e for e in entries if e.unique_id == self.ENTRY_UNIQUE_IDS["bluetooth"]), None
+            (e for e in entries if e.unique_id == self.ENTRY_UNIQUE_IDS["bluetooth"]),
+            None,
         )
         existing_addresses = {
             t.get(CONF_BLUETOOTH_ADDRESS)
-            for t in (bluetooth_entry.data.get(CONF_TARGETS, []) if bluetooth_entry else [])
+            for t in (
+                bluetooth_entry.data.get(CONF_TARGETS, []) if bluetooth_entry else []
+            )
             if t.get(CONF_BLUETOOTH_ADDRESS)
         }
 
@@ -641,7 +758,9 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 data_schema=vol.Schema({}),
             )
 
-        available = [d for d in bluetooth_devices if d["bt_address"] not in existing_addresses]
+        available = [
+            d for d in bluetooth_devices if d["bt_address"] not in existing_addresses
+        ]
         if not available:
             return self.async_show_form(
                 step_id="bluetooth_device",
@@ -652,9 +771,16 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             self._bluetooth_selected_address = user_input[CONF_BLUETOOTH_ADDRESS]
             matched = next(
-                (d for d in bluetooth_devices if d["bt_address"] == self._bluetooth_selected_address), {}
+                (
+                    d
+                    for d in bluetooth_devices
+                    if d["bt_address"] == self._bluetooth_selected_address
+                ),
+                {},
             )
-            self._bluetooth_selected_name = matched.get("name") or self._bluetooth_selected_address
+            self._bluetooth_selected_name = (
+                matched.get("name") or self._bluetooth_selected_address
+            )
             self._bluetooth_selected_model = matched.get("model")
             self._bluetooth_selected_manufacturer = matched.get("manufacturer")
             return await self.async_step_bluetooth_configure()
@@ -668,17 +794,21 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         }
         return self.async_show_form(
             step_id="bluetooth_device",
-            data_schema=vol.Schema({
-                vol.Required(CONF_BLUETOOTH_ADDRESS): vol.In(device_choices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_BLUETOOTH_ADDRESS): vol.In(device_choices),
+                }
+            ),
         )
 
-    async def async_step_bluetooth_configure(self, user_input=None):
+    async def async_step_bluetooth_configure(self, user_input=None) -> ConfigFlowResult:
         """Set device name and alert settings for the selected Bluetooth device."""
         entries = self._async_current_entries()
 
         if user_input is not None:
-            device_name = (user_input.get("device_name") or "").strip() or self._bluetooth_selected_name
+            device_name = (
+                user_input.get("device_name") or ""
+            ).strip() or self._bluetooth_selected_name
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
             new_target = {
@@ -688,12 +818,16 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 "device_name": device_name,
                 CONF_ALERT_GROUP: (
                     user_input.get(CONF_ALERT_GROUP, "") or DEFAULT_ALERT_GROUP
-                ) if alerts_enabled else DEFAULT_ALERT_GROUP,
+                )
+                if alerts_enabled
+                else DEFAULT_ALERT_GROUP,
                 CONF_ALERT_DELAY: user_input.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
-                CONF_ALERT_ACTION: (
-                    user_input.get(CONF_ALERT_ACTION, "") or ""
-                ) if action_enabled else "",
-                CONF_ALERT_ACTION_DELAY: user_input.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
+                CONF_ALERT_ACTION: (user_input.get(CONF_ALERT_ACTION, "") or "")
+                if action_enabled
+                else "",
+                CONF_ALERT_ACTION_DELAY: user_input.get(
+                    CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+                ),
             }
             if self._bluetooth_selected_model:
                 new_target["model"] = self._bluetooth_selected_model
@@ -712,7 +846,9 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         notify_groups = await self._async_get_notify_groups()
         alert_actions = await self._async_get_alert_actions()
         schema = {
-            vol.Optional("device_name", default=self._bluetooth_selected_name or ""): str,
+            vol.Optional(
+                "device_name", default=self._bluetooth_selected_name or ""
+            ): str,
             vol.Optional(CONF_ALERTS_ENABLED, default=False): bool,
             vol.Required(CONF_ALERT_DELAY, default=DEFAULT_ALERT_DELAY): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
@@ -721,11 +857,13 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if notify_groups:
             notify_groups_dict = {k: f"notify.{v}" for k, v in notify_groups.items()}
             notify_groups_dict[""] = "No alert group"
-            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(notify_groups_dict)
+            schema[vol.Optional(CONF_ALERT_GROUP, default="")] = vol.In(
+                notify_groups_dict
+            )
         schema[vol.Optional(CONF_ALERT_ACTION_ENABLED, default=False)] = bool
-        schema[vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)] = vol.All(
-            vol.Coerce(int), vol.Range(min=1, max=120)
-        )
+        schema[
+            vol.Required(CONF_ALERT_ACTION_DELAY, default=DEFAULT_ALERT_ACTION_DELAY)
+        ] = vol.All(vol.Coerce(int), vol.Range(min=1, max=120))
         if alert_actions:
             actions_dict = {"": "No action"}
             actions_dict.update(alert_actions)
@@ -740,7 +878,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             },
         )
 
-    async def async_step_dns(self, user_input=None):
+    async def async_step_dns(self, user_input=None) -> ConfigFlowResult:
         """Handle DNS server configuration."""
         errors = {}
 
@@ -748,21 +886,29 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             dns_server = user_input[CONF_DNS_SERVER]
             if is_valid_ip(dns_server):
                 self._data[CONF_DNS_SERVER] = dns_server
-                return await self.async_step_interval()
-            errors["base"] = "invalid_dns_server"
+                if (
+                    not self._async_current_entries()
+                    and self._data.get(CONF_PROTOCOL) in NETWORK_PROTOCOLS
+                    and not await self._async_validate_network_target()
+                ):
+                    errors["base"] = "cannot_connect"
+                else:
+                    return await self.async_step_interval()
+            else:
+                errors["base"] = "invalid_dns_server"
 
         return self.async_show_form(
             step_id="dns",
-            data_schema=vol.Schema({
-                vol.Required(CONF_DNS_SERVER, default=DEFAULT_DNS_SERVER): str,
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_DNS_SERVER, default=DEFAULT_DNS_SERVER): str,
+                }
+            ),
             errors=errors,
-            description_placeholders={
-                "default_dns": DEFAULT_DNS_SERVER
-            }
+            description_placeholders={"default_dns": DEFAULT_DNS_SERVER},
         )
 
-    async def async_step_interval(self, user_input=None):
+    async def async_step_interval(self, user_input=None) -> ConfigFlowResult:
         """Handle setting the update interval."""
         if user_input is not None:
             self._data[CONF_INTERVAL] = user_input[CONF_INTERVAL]
@@ -770,31 +916,41 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self.async_show_form(
             step_id="interval",
-            data_schema=vol.Schema({
-                vol.Required(CONF_INTERVAL, default=DEFAULT_INTERVAL): vol.All(
-                    vol.Coerce(int), vol.Range(min=5, max=300)
-                ),
-            })
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_INTERVAL, default=DEFAULT_INTERVAL): vol.All(
+                        vol.Coerce(int), vol.Range(min=5, max=300)
+                    ),
+                }
+            ),
         )
 
-    async def async_step_port(self, user_input=None):
+    async def async_step_port(self, user_input=None) -> ConfigFlowResult:
         """Handle port configuration."""
+        errors = {}
+
         if user_input is not None:
             self._data.update(user_input)
             if not self._async_current_entries():
                 return await self.async_step_dns()
-            return await self.async_step_finish()
+            if not await self._async_validate_network_target():
+                errors["base"] = "cannot_connect"
+            else:
+                return await self.async_step_finish()
 
         return self.async_show_form(
             step_id="port",
-            data_schema=vol.Schema({
-                vol.Required(CONF_PORT, default=DEFAULT_PORT): vol.All(
-                    vol.Coerce(int), vol.Range(min=1, max=65535)
-                ),
-            })
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_PORT, default=DEFAULT_PORT): vol.All(
+                        vol.Coerce(int), vol.Range(min=1, max=65535)
+                    ),
+                }
+            ),
+            errors=errors,
         )
 
-    async def async_step_finish(self, user_input=None):
+    async def async_step_finish(self, user_input=None) -> ConfigFlowResult:
         """Create or update the correct typed config entry."""
         entries = self._async_current_entries()
 
@@ -817,7 +973,9 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         typed_entry = next((e for e in entries if e.unique_id == unique_id), None)
 
         if entry_type == "network":
-            device_name = self._data.get("device_name", "").strip() or self._data[CONF_HOST]
+            device_name = (
+                self._data.get("device_name", "").strip() or self._data[CONF_HOST]
+            )
             targets = list(typed_entry.data[CONF_TARGETS]) if typed_entry else []
 
             base_target = {
@@ -827,7 +985,9 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 CONF_ALERT_GROUP: self._data.get(CONF_ALERT_GROUP, DEFAULT_ALERT_GROUP),
                 CONF_ALERT_DELAY: self._data.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
                 CONF_ALERT_ACTION: self._data.get(CONF_ALERT_ACTION, ""),
-                CONF_ALERT_ACTION_DELAY: self._data.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
+                CONF_ALERT_ACTION_DELAY: self._data.get(
+                    CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+                ),
             }
 
             if self._data[CONF_PROTOCOL] == PROTOCOL_AD_DC:
@@ -848,24 +1008,32 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 existing = list(typed_entry.data[CONF_TARGETS])
                 if entry_type == "zha":
                     existing_keys = {t.get(CONF_ZHA_IEEE) for t in existing}
-                    for t in new_items:
-                        if t.get(CONF_ZHA_IEEE) not in existing_keys:
-                            existing.append(t)
+                    existing.extend(
+                        t
+                        for t in new_items
+                        if t.get(CONF_ZHA_IEEE) not in existing_keys
+                    )
                 elif entry_type == "matter":
                     existing_keys = {t.get(CONF_MATTER_NODE_ID) for t in existing}
-                    for t in new_items:
-                        if t.get(CONF_MATTER_NODE_ID) not in existing_keys:
-                            existing.append(t)
+                    existing.extend(
+                        t
+                        for t in new_items
+                        if t.get(CONF_MATTER_NODE_ID) not in existing_keys
+                    )
                 elif entry_type == "esphome":
                     existing_keys = {t.get(CONF_ESPHOME_DEVICE_ID) for t in existing}
-                    for t in new_items:
-                        if t.get(CONF_ESPHOME_DEVICE_ID) not in existing_keys:
-                            existing.append(t)
+                    existing.extend(
+                        t
+                        for t in new_items
+                        if t.get(CONF_ESPHOME_DEVICE_ID) not in existing_keys
+                    )
                 else:  # bluetooth
                     existing_keys = {t.get(CONF_BLUETOOTH_ADDRESS) for t in existing}
-                    for t in new_items:
-                        if t.get(CONF_BLUETOOTH_ADDRESS) not in existing_keys:
-                            existing.append(t)
+                    existing.extend(
+                        t
+                        for t in new_items
+                        if t.get(CONF_BLUETOOTH_ADDRESS) not in existing_keys
+                    )
                 targets = existing
             else:
                 targets = new_items
@@ -888,6 +1056,7 @@ class ConnectivityMonitorConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             data=data,
         )
 
+
 class OptionsFlowHandler(config_entries.OptionsFlow):
     """Handle options flow."""
 
@@ -901,8 +1070,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     def __init__(self) -> None:
         """Initialize options flow."""
-        self.config_data = {}
-        self._targets = []
+        self.config_data: dict = {}
+        self._targets: list = []
         self._selected_device = None
         # ZHA device selection state
         self._zha_selected_ieee: str | None = None
@@ -922,8 +1091,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
     async def _async_get_notify_groups(self):
         """Get list of notification groups from Home Assistant."""
         notify_services = self.hass.services.async_services().get("notify", {})
-        groups = {name: name.replace("notify.", "") for name in notify_services.keys()}
-        return groups
+        return {name: name.replace("notify.", "") for name in notify_services}
 
     async def _async_get_alert_actions(self):
         """Get available automations and scripts that can be triggered as alert actions."""
@@ -938,7 +1106,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
     def _get_entry_type(self) -> str:
         """Determine the typed config entry this options flow is editing."""
-        entry_type = self.ENTRY_TYPES_BY_UNIQUE_ID.get(self.config_entry.unique_id)
+        entry_type = self.ENTRY_TYPES_BY_UNIQUE_ID.get(
+            self.config_entry.unique_id or ""
+        )
         if entry_type is not None:
             return entry_type
 
@@ -972,13 +1142,13 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             **common_actions,
         }
 
-    async def async_step_init(self, user_input=None):
+    async def async_step_init(self, user_input=None) -> ConfigFlowResult:
         """Manage the options."""
         self.config_data = dict(self.config_entry.data)
         self._targets = list(self.config_data[CONF_TARGETS])
         return await self.async_step_menu()
 
-    async def async_step_menu(self, user_input=None):
+    async def async_step_menu(self, user_input=None) -> ConfigFlowResult:
         """Show the top-level action menu."""
         if user_input is not None:
             action = user_input["action"]
@@ -986,7 +1156,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
             if action == "rename":
                 return await self.async_step_rename_device_select()
-            elif action == "alerts":
+            if action == "alerts":
                 if entry_type == "network":
                     return await self.async_step_device_select()
                 if entry_type == "zha":
@@ -1017,12 +1187,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="menu",
-            data_schema=vol.Schema({
-                vol.Required("action"): vol.In(actions),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): vol.In(actions),
+                }
+            ),
         )
 
-    async def async_step_settings_menu(self, user_input=None):
+    async def async_step_settings_menu(self, user_input=None) -> ConfigFlowResult:
         """Show settings-related actions."""
         if user_input is not None:
             action = user_input["action"]
@@ -1033,83 +1205,101 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="settings_menu",
-            data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
-                    "general": "Modify General Settings",
-                    "cleanup": "Clean up Orphaned Devices",
-                }),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): vol.In(
+                        {
+                            "general": "Modify General Settings",
+                            "cleanup": "Clean up Orphaned Devices",
+                        }
+                    ),
+                }
+            ),
         )
 
-    async def async_step_network_menu(self, user_input=None):
+    async def async_step_network_menu(self, user_input=None) -> ConfigFlowResult:
         """Show the Network Device sub-menu."""
         if user_input is not None:
             action = user_input["action"]
             if action == "rename":
                 return await self.async_step_rename_device_select()
-            elif action == "alerts":
+            if action == "alerts":
                 return await self.async_step_device_select()
-            elif action == "remove_device":
+            if action == "remove_device":
                 return await self.async_step_remove_device()
-            elif action == "remove_sensor":
+            if action == "remove_sensor":
                 return await self.async_step_remove_sensor()
 
         return self.async_show_form(
             step_id="network_menu",
-            data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
-                    "rename": "Change Host / Device Name",
-                    "alerts": "Modify Alert Settings",
-                    "remove_device": "Remove Device",
-                    "remove_sensor": "Remove Single Sensor",
-                }),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): vol.In(
+                        {
+                            "rename": "Change Host / Device Name",
+                            "alerts": "Modify Alert Settings",
+                            "remove_device": "Remove Device",
+                            "remove_sensor": "Remove Single Sensor",
+                        }
+                    ),
+                }
+            ),
         )
 
-    async def async_step_zha_menu(self, user_input=None):
+    async def async_step_zha_menu(self, user_input=None) -> ConfigFlowResult:
         """Show the ZigBee (ZHA) Device sub-menu."""
         if user_input is not None:
             action = user_input["action"]
             if action == "timeout":
                 return await self.async_step_zha_select_for_timeout()
-            elif action == "alerts":
+            if action == "alerts":
                 return await self.async_step_zha_alert_select()
-            elif action == "remove":
+            if action == "remove":
                 return await self.async_step_remove_zha_device()
 
         return self.async_show_form(
             step_id="zha_menu",
-            data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
-                    "timeout": "Change Inactivity Timeout",
-                    "alerts": "Modify Alert Settings",
-                    "remove": "Remove Device",
-                }),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): vol.In(
+                        {
+                            "timeout": "Change Inactivity Timeout",
+                            "alerts": "Modify Alert Settings",
+                            "remove": "Remove Device",
+                        }
+                    ),
+                }
+            ),
         )
 
-    async def async_step_matter_menu(self, user_input=None):
+    async def async_step_matter_menu(self, user_input=None) -> ConfigFlowResult:
         """Show the Matter Device sub-menu."""
         if user_input is not None:
             action = user_input["action"]
             if action == "alerts":
                 return await self.async_step_matter_alert_select()
-            elif action == "remove":
+            if action == "remove":
                 return await self.async_step_remove_matter_device()
 
         return self.async_show_form(
             step_id="matter_menu",
-            data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
-                    "alerts": "Modify Alert Settings",
-                    "remove": "Remove Device",
-                }),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): vol.In(
+                        {
+                            "alerts": "Modify Alert Settings",
+                            "remove": "Remove Device",
+                        }
+                    ),
+                }
+            ),
         )
 
-    async def async_step_matter_alert_select(self, user_input=None):
+    async def async_step_matter_alert_select(self, user_input=None) -> ConfigFlowResult:
         """Select which Matter device to configure alerts for."""
-        matter_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER]
+        matter_targets = [
+            t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER
+        ]
         if not matter_targets:
             return await self.async_step_menu()
 
@@ -1118,40 +1308,55 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return await self.async_step_matter_alert_config()
 
         devices = {
-            t[CONF_MATTER_NODE_ID]: f"{t.get('device_name', t[CONF_MATTER_NODE_ID])} ({t[CONF_MATTER_NODE_ID]})"
+            t[
+                CONF_MATTER_NODE_ID
+            ]: f"{t.get('device_name', t[CONF_MATTER_NODE_ID])} ({t[CONF_MATTER_NODE_ID]})"
             for t in sorted(matter_targets, key=lambda x: x.get("device_name", ""))
         }
         return self.async_show_form(
             step_id="matter_alert_select",
-            data_schema=vol.Schema({
-                vol.Required("node_id"): vol.In(devices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("node_id"): vol.In(devices),
+                }
+            ),
         )
 
-    async def async_step_matter_alert_config(self, user_input=None):
+    async def async_step_matter_alert_config(self, user_input=None) -> ConfigFlowResult:
         """Configure alert settings for the selected Matter device."""
         notify_groups = await self._async_get_notify_groups()
         alert_actions = await self._async_get_alert_actions()
 
-        current_target = next(
-            (t for t in self._targets
-             if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER and t.get(CONF_MATTER_NODE_ID) == self._matter_selected_node_id),
-            {}
+        current_target: dict[str, Any] = next(
+            (
+                t
+                for t in self._targets
+                if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER
+                and t.get(CONF_MATTER_NODE_ID) == self._matter_selected_node_id
+            ),
+            {},
         )
         current_alert_group = current_target.get(CONF_ALERT_GROUP, "")
         current_alert_delay = current_target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
         current_alerts_enabled = bool(current_alert_group)
         current_alert_action = current_target.get(CONF_ALERT_ACTION, "")
-        current_action_delay = current_target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+        current_action_delay = current_target.get(
+            CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+        )
         current_action_enabled = bool(current_alert_action)
 
         if user_input is not None:
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
             action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
-            alert_action = user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            alert_action = (
+                user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            )
             for t in self._targets:
-                if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER and t.get(CONF_MATTER_NODE_ID) == self._matter_selected_node_id:
+                if (
+                    t.get(CONF_PROTOCOL) == PROTOCOL_MATTER
+                    and t.get(CONF_MATTER_NODE_ID) == self._matter_selected_node_id
+                ):
                     if alert_group:
                         t[CONF_ALERT_GROUP] = alert_group
                     else:
@@ -1174,29 +1379,39 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         notify_groups_dict[""] = "No alert group"
         schema = {
             vol.Optional(CONF_ALERTS_ENABLED, default=current_alerts_enabled): bool,
-            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(notify_groups_dict),
+            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(
+                notify_groups_dict
+            ),
             vol.Required(CONF_ALERT_DELAY, default=current_alert_delay): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
             ),
-            vol.Optional(CONF_ALERT_ACTION_ENABLED, default=current_action_enabled): bool,
-            vol.Required(CONF_ALERT_ACTION_DELAY, default=current_action_delay): vol.All(
-                vol.Coerce(int), vol.Range(min=1, max=120)
-            ),
+            vol.Optional(
+                CONF_ALERT_ACTION_ENABLED, default=current_action_enabled
+            ): bool,
+            vol.Required(
+                CONF_ALERT_ACTION_DELAY, default=current_action_delay
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=120)),
         }
         if alert_actions:
-            actions_dict = {"" : "No action"}
+            actions_dict = {"": "No action"}
             actions_dict.update(alert_actions)
-            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = vol.In(actions_dict)
+            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = (
+                vol.In(actions_dict)
+            )
         return self.async_show_form(
             step_id="matter_alert_config",
             data_schema=vol.Schema(schema),
         )
 
-    async def async_step_remove_matter_device(self, user_input=None):
+    async def async_step_remove_matter_device(
+        self, user_input=None
+    ) -> ConfigFlowResult:
         """Remove a monitored Matter device."""
-        entity_registry = async_get_entity_registry(self.hass)
+        entity_registry = er.async_get(self.hass)
 
-        matter_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER]
+        matter_targets = [
+            t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER
+        ]
         if not matter_targets:
             return await self.async_step_menu()
 
@@ -1205,14 +1420,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
             # Remove from targets list
             self._targets = [
-                t for t in self._targets
-                if not (t.get(CONF_PROTOCOL) == PROTOCOL_MATTER and t.get(CONF_MATTER_NODE_ID) == node_id)
+                t
+                for t in self._targets
+                if not (
+                    t.get(CONF_PROTOCOL) == PROTOCOL_MATTER
+                    and t.get(CONF_MATTER_NODE_ID) == node_id
+                )
             ]
 
             # Remove only our monitoring entity — the Matter device itself stays
             node_id_clean = node_id.replace("-", "_").replace(":", "_")
             unique_id = f"connectivity_matter_{node_id_clean}"
-            entry_entities = async_entries_for_config_entry(
+            entry_entities = er.async_entries_for_config_entry(
                 entity_registry, self.config_entry.entry_id
             )
             for entity_entry in entry_entities:
@@ -1228,57 +1447,73 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data={})
 
         devices = {
-            t[CONF_MATTER_NODE_ID]: f"{t.get('device_name', t[CONF_MATTER_NODE_ID])} ({t[CONF_MATTER_NODE_ID]})"
+            t[
+                CONF_MATTER_NODE_ID
+            ]: f"{t.get('device_name', t[CONF_MATTER_NODE_ID])} ({t[CONF_MATTER_NODE_ID]})"
             for t in sorted(matter_targets, key=lambda x: x.get("device_name", ""))
         }
         return self.async_show_form(
             step_id="remove_matter_device",
-            data_schema=vol.Schema({
-                vol.Required("node_id"): vol.In(devices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("node_id"): vol.In(devices),
+                }
+            ),
         )
 
-    async def async_step_esphome_menu(self, user_input=None):
+    async def async_step_esphome_menu(self, user_input=None) -> ConfigFlowResult:
         """Show the ESPHome Device sub-menu."""
         if user_input is not None:
             action = user_input["action"]
             if action == "alerts":
                 return await self.async_step_esphome_alert_select()
-            elif action == "remove":
+            if action == "remove":
                 return await self.async_step_remove_esphome_device()
 
         return self.async_show_form(
             step_id="esphome_menu",
-            data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
-                    "alerts": "Modify Alert Settings",
-                    "remove": "Remove Device",
-                }),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): vol.In(
+                        {
+                            "alerts": "Modify Alert Settings",
+                            "remove": "Remove Device",
+                        }
+                    ),
+                }
+            ),
         )
 
-    async def async_step_bluetooth_menu(self, user_input=None):
+    async def async_step_bluetooth_menu(self, user_input=None) -> ConfigFlowResult:
         """Show the Bluetooth Device sub-menu."""
         if user_input is not None:
             action = user_input["action"]
             if action == "alerts":
                 return await self.async_step_bluetooth_alert_select()
-            elif action == "remove":
+            if action == "remove":
                 return await self.async_step_remove_bluetooth_device()
 
         return self.async_show_form(
             step_id="bluetooth_menu",
-            data_schema=vol.Schema({
-                vol.Required("action"): vol.In({
-                    "alerts": "Modify Alert Settings",
-                    "remove": "Remove Device",
-                }),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("action"): vol.In(
+                        {
+                            "alerts": "Modify Alert Settings",
+                            "remove": "Remove Device",
+                        }
+                    ),
+                }
+            ),
         )
 
-    async def async_step_bluetooth_alert_select(self, user_input=None):
+    async def async_step_bluetooth_alert_select(
+        self, user_input=None
+    ) -> ConfigFlowResult:
         """Select which Bluetooth device to configure alerts for."""
-        bluetooth_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH]
+        bluetooth_targets = [
+            t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH
+        ]
         if not bluetooth_targets:
             return await self.async_step_menu()
 
@@ -1287,40 +1522,58 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return await self.async_step_bluetooth_alert_config()
 
         devices = {
-            t[CONF_BLUETOOTH_ADDRESS]: f"{t.get('device_name', t[CONF_BLUETOOTH_ADDRESS])} ({t[CONF_BLUETOOTH_ADDRESS]})"
+            t[
+                CONF_BLUETOOTH_ADDRESS
+            ]: f"{t.get('device_name', t[CONF_BLUETOOTH_ADDRESS])} ({t[CONF_BLUETOOTH_ADDRESS]})"
             for t in sorted(bluetooth_targets, key=lambda x: x.get("device_name", ""))
         }
         return self.async_show_form(
             step_id="bluetooth_alert_select",
-            data_schema=vol.Schema({
-                vol.Required("bt_address"): vol.In(devices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("bt_address"): vol.In(devices),
+                }
+            ),
         )
 
-    async def async_step_bluetooth_alert_config(self, user_input=None):
+    async def async_step_bluetooth_alert_config(
+        self, user_input=None
+    ) -> ConfigFlowResult:
         """Configure alert settings for the selected Bluetooth device."""
         notify_groups = await self._async_get_notify_groups()
         alert_actions = await self._async_get_alert_actions()
 
-        current_target = next(
-            (t for t in self._targets
-             if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH and t.get(CONF_BLUETOOTH_ADDRESS) == self._bluetooth_selected_address),
-            {}
+        current_target: dict[str, Any] = next(
+            (
+                t
+                for t in self._targets
+                if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH
+                and t.get(CONF_BLUETOOTH_ADDRESS) == self._bluetooth_selected_address
+            ),
+            {},
         )
         current_alert_group = current_target.get(CONF_ALERT_GROUP, "")
         current_alert_delay = current_target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
         current_alerts_enabled = bool(current_alert_group)
         current_alert_action = current_target.get(CONF_ALERT_ACTION, "")
-        current_action_delay = current_target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+        current_action_delay = current_target.get(
+            CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+        )
         current_action_enabled = bool(current_alert_action)
 
         if user_input is not None:
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
             action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
-            alert_action = user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            alert_action = (
+                user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            )
             for t in self._targets:
-                if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH and t.get(CONF_BLUETOOTH_ADDRESS) == self._bluetooth_selected_address:
+                if (
+                    t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH
+                    and t.get(CONF_BLUETOOTH_ADDRESS)
+                    == self._bluetooth_selected_address
+                ):
                     if alert_group:
                         t[CONF_ALERT_GROUP] = alert_group
                     else:
@@ -1343,29 +1596,39 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         notify_groups_dict[""] = "No alert group"
         schema = {
             vol.Optional(CONF_ALERTS_ENABLED, default=current_alerts_enabled): bool,
-            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(notify_groups_dict),
+            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(
+                notify_groups_dict
+            ),
             vol.Required(CONF_ALERT_DELAY, default=current_alert_delay): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
             ),
-            vol.Optional(CONF_ALERT_ACTION_ENABLED, default=current_action_enabled): bool,
-            vol.Required(CONF_ALERT_ACTION_DELAY, default=current_action_delay): vol.All(
-                vol.Coerce(int), vol.Range(min=1, max=120)
-            ),
+            vol.Optional(
+                CONF_ALERT_ACTION_ENABLED, default=current_action_enabled
+            ): bool,
+            vol.Required(
+                CONF_ALERT_ACTION_DELAY, default=current_action_delay
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=120)),
         }
         if alert_actions:
             actions_dict = {"": "No action"}
             actions_dict.update(alert_actions)
-            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = vol.In(actions_dict)
+            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = (
+                vol.In(actions_dict)
+            )
         return self.async_show_form(
             step_id="bluetooth_alert_config",
             data_schema=vol.Schema(schema),
         )
 
-    async def async_step_remove_bluetooth_device(self, user_input=None):
+    async def async_step_remove_bluetooth_device(
+        self, user_input=None
+    ) -> ConfigFlowResult:
         """Remove a monitored Bluetooth device."""
-        entity_registry = async_get_entity_registry(self.hass)
+        entity_registry = er.async_get(self.hass)
 
-        bluetooth_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH]
+        bluetooth_targets = [
+            t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH
+        ]
         if not bluetooth_targets:
             return await self.async_step_menu()
 
@@ -1373,13 +1636,17 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             bt_address = user_input["bt_address"]
 
             self._targets = [
-                t for t in self._targets
-                if not (t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH and t.get(CONF_BLUETOOTH_ADDRESS) == bt_address)
+                t
+                for t in self._targets
+                if not (
+                    t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH
+                    and t.get(CONF_BLUETOOTH_ADDRESS) == bt_address
+                )
             ]
 
             bt_address_clean = bt_address.replace("-", "_").replace(":", "_")
             unique_id = f"connectivity_bluetooth_{bt_address_clean}"
-            entry_entities = async_entries_for_config_entry(
+            entry_entities = er.async_entries_for_config_entry(
                 entity_registry, self.config_entry.entry_id
             )
             for entity_entry in entry_entities:
@@ -1395,19 +1662,27 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data={})
 
         devices = {
-            t[CONF_BLUETOOTH_ADDRESS]: f"{t.get('device_name', t[CONF_BLUETOOTH_ADDRESS])} ({t[CONF_BLUETOOTH_ADDRESS]})"
+            t[
+                CONF_BLUETOOTH_ADDRESS
+            ]: f"{t.get('device_name', t[CONF_BLUETOOTH_ADDRESS])} ({t[CONF_BLUETOOTH_ADDRESS]})"
             for t in sorted(bluetooth_targets, key=lambda x: x.get("device_name", ""))
         }
         return self.async_show_form(
             step_id="remove_bluetooth_device",
-            data_schema=vol.Schema({
-                vol.Required("bt_address"): vol.In(devices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("bt_address"): vol.In(devices),
+                }
+            ),
         )
 
-    async def async_step_esphome_alert_select(self, user_input=None):
+    async def async_step_esphome_alert_select(
+        self, user_input=None
+    ) -> ConfigFlowResult:
         """Select which ESPHome device to configure alerts for."""
-        esphome_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME]
+        esphome_targets = [
+            t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME
+        ]
         if not esphome_targets:
             return await self.async_step_menu()
 
@@ -1416,40 +1691,58 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return await self.async_step_esphome_alert_config()
 
         devices = {
-            t[CONF_ESPHOME_DEVICE_ID]: f"{t.get('device_name', t[CONF_ESPHOME_DEVICE_ID])} ({t[CONF_ESPHOME_DEVICE_ID]})"
+            t[
+                CONF_ESPHOME_DEVICE_ID
+            ]: f"{t.get('device_name', t[CONF_ESPHOME_DEVICE_ID])} ({t[CONF_ESPHOME_DEVICE_ID]})"
             for t in sorted(esphome_targets, key=lambda x: x.get("device_name", ""))
         }
         return self.async_show_form(
             step_id="esphome_alert_select",
-            data_schema=vol.Schema({
-                vol.Required("device_id"): vol.In(devices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device_id"): vol.In(devices),
+                }
+            ),
         )
 
-    async def async_step_esphome_alert_config(self, user_input=None):
+    async def async_step_esphome_alert_config(
+        self, user_input=None
+    ) -> ConfigFlowResult:
         """Configure alert settings for the selected ESPHome device."""
         notify_groups = await self._async_get_notify_groups()
         alert_actions = await self._async_get_alert_actions()
 
-        current_target = next(
-            (t for t in self._targets
-             if t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME and t.get(CONF_ESPHOME_DEVICE_ID) == self._esphome_selected_device_id),
-            {}
+        current_target: dict[str, Any] = next(
+            (
+                t
+                for t in self._targets
+                if t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME
+                and t.get(CONF_ESPHOME_DEVICE_ID) == self._esphome_selected_device_id
+            ),
+            {},
         )
         current_alert_group = current_target.get(CONF_ALERT_GROUP, "")
         current_alert_delay = current_target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
         current_alerts_enabled = bool(current_alert_group)
         current_alert_action = current_target.get(CONF_ALERT_ACTION, "")
-        current_action_delay = current_target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+        current_action_delay = current_target.get(
+            CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+        )
         current_action_enabled = bool(current_alert_action)
 
         if user_input is not None:
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
             action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
-            alert_action = user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            alert_action = (
+                user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            )
             for t in self._targets:
-                if t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME and t.get(CONF_ESPHOME_DEVICE_ID) == self._esphome_selected_device_id:
+                if (
+                    t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME
+                    and t.get(CONF_ESPHOME_DEVICE_ID)
+                    == self._esphome_selected_device_id
+                ):
                     if alert_group:
                         t[CONF_ALERT_GROUP] = alert_group
                     else:
@@ -1472,29 +1765,39 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         notify_groups_dict[""] = "No alert group"
         schema = {
             vol.Optional(CONF_ALERTS_ENABLED, default=current_alerts_enabled): bool,
-            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(notify_groups_dict),
+            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(
+                notify_groups_dict
+            ),
             vol.Required(CONF_ALERT_DELAY, default=current_alert_delay): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
             ),
-            vol.Optional(CONF_ALERT_ACTION_ENABLED, default=current_action_enabled): bool,
-            vol.Required(CONF_ALERT_ACTION_DELAY, default=current_action_delay): vol.All(
-                vol.Coerce(int), vol.Range(min=1, max=120)
-            ),
+            vol.Optional(
+                CONF_ALERT_ACTION_ENABLED, default=current_action_enabled
+            ): bool,
+            vol.Required(
+                CONF_ALERT_ACTION_DELAY, default=current_action_delay
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=120)),
         }
         if alert_actions:
-            actions_dict = {"" : "No action"}
+            actions_dict = {"": "No action"}
             actions_dict.update(alert_actions)
-            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = vol.In(actions_dict)
+            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = (
+                vol.In(actions_dict)
+            )
         return self.async_show_form(
             step_id="esphome_alert_config",
             data_schema=vol.Schema(schema),
         )
 
-    async def async_step_remove_esphome_device(self, user_input=None):
+    async def async_step_remove_esphome_device(
+        self, user_input=None
+    ) -> ConfigFlowResult:
         """Remove a monitored ESPHome device."""
-        entity_registry = async_get_entity_registry(self.hass)
+        entity_registry = er.async_get(self.hass)
 
-        esphome_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME]
+        esphome_targets = [
+            t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME
+        ]
         if not esphome_targets:
             return await self.async_step_menu()
 
@@ -1503,14 +1806,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
             # Remove from targets list
             self._targets = [
-                t for t in self._targets
-                if not (t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME and t.get(CONF_ESPHOME_DEVICE_ID) == device_id)
+                t
+                for t in self._targets
+                if not (
+                    t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME
+                    and t.get(CONF_ESPHOME_DEVICE_ID) == device_id
+                )
             ]
 
             # Remove only our monitoring entity — the ESPHome device stays
             device_id_clean = device_id.replace("-", "_").replace(":", "_")
             unique_id = f"connectivity_esphome_{device_id_clean}"
-            entry_entities = async_entries_for_config_entry(
+            entry_entities = er.async_entries_for_config_entry(
                 entity_registry, self.config_entry.entry_id
             )
             for entity_entry in entry_entities:
@@ -1526,21 +1833,32 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data={})
 
         devices = {
-            t[CONF_ESPHOME_DEVICE_ID]: f"{t.get('device_name', t[CONF_ESPHOME_DEVICE_ID])} ({t[CONF_ESPHOME_DEVICE_ID]})"
+            t[
+                CONF_ESPHOME_DEVICE_ID
+            ]: f"{t.get('device_name', t[CONF_ESPHOME_DEVICE_ID])} ({t[CONF_ESPHOME_DEVICE_ID]})"
             for t in sorted(esphome_targets, key=lambda x: x.get("device_name", ""))
         }
         return self.async_show_form(
             step_id="remove_esphome_device",
-            data_schema=vol.Schema({
-                vol.Required("device_id"): vol.In(devices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device_id"): vol.In(devices),
+                }
+            ),
         )
 
-    async def async_step_rename_device_select(self, user_input=None):
+    async def async_step_rename_device_select(
+        self, user_input=None
+    ) -> ConfigFlowResult:
         """Select which device to rename (network devices only)."""
         devices = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH):
+            if target.get(CONF_PROTOCOL) in (
+                PROTOCOL_ZHA,
+                PROTOCOL_MATTER,
+                PROTOCOL_ESPHOME,
+                PROTOCOL_BLUETOOTH,
+            ):
                 continue  # Shared-registry devices don't support host renaming
             device_host = target[CONF_HOST]
             if device_host not in devices:
@@ -1553,17 +1871,24 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="rename_device_select",
-            data_schema=vol.Schema({
-                vol.Required("device"): vol.In(
-                    dict(sorted(
-                        {host: f"{name} ({host})" for host, name in devices.items()}.items(),
-                        key=lambda x: x[1].lower()
-                    ))
-                )
-            })
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device"): vol.In(
+                        dict(
+                            sorted(
+                                {
+                                    host: f"{name} ({host})"
+                                    for host, name in devices.items()
+                                }.items(),
+                                key=lambda x: x[1].lower(),
+                            )
+                        )
+                    )
+                }
+            ),
         )
 
-    async def async_step_rename_host(self, user_input=None):
+    async def async_step_rename_host(self, user_input=None) -> ConfigFlowResult:
         """Enter the new host IP/FQDN and device name."""
         errors = {}
 
@@ -1582,15 +1907,16 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 errors[CONF_HOST] = "invalid_host"
             else:
                 old_host = self._selected_device
-                device_registry = async_get_device_registry(self.hass)
+                device_registry = dr.async_get(self.hass)
 
                 # Locate device entries via hw_version, which is always set to
                 # target[CONF_HOST] in DeviceInfo — works regardless of whether
                 # the identifier uses a MAC or the host string.
                 old_device_ids = set()
                 for device_entry in device_registry.devices.values():
-                    if (device_entry.hw_version == old_host and
-                            any(i[0] == DOMAIN for i in device_entry.identifiers)):
+                    if device_entry.hw_version == old_host and any(
+                        i[0] == DOMAIN for i in device_entry.identifiers
+                    ):
                         old_device_ids.add(device_entry.id)
 
                 # Update all targets that belong to the old host
@@ -1602,8 +1928,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 # Save updated config
                 self.config_data[CONF_TARGETS] = self._targets
                 self.hass.config_entries.async_update_entry(
-                    self.config_entry,
-                    data=self.config_data
+                    self.config_entry, data=self.config_data
                 )
 
                 # Remove old device registry entries. Entity registry cleanup
@@ -1616,19 +1941,26 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="rename_host",
-            data_schema=vol.Schema({
-                vol.Required(CONF_HOST, default=self._selected_device): str,
-                vol.Optional("device_name", default=current_device_name): str,
-            }),
-            errors=errors
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST, default=self._selected_device): str,
+                    vol.Optional("device_name", default=current_device_name): str,
+                }
+            ),
+            errors=errors,
         )
 
-    async def async_step_device_select(self, user_input=None):
+    async def async_step_device_select(self, user_input=None) -> ConfigFlowResult:
         """First step of alert modification - device selection (network only)."""
         # Get unique devices (skip ZHA and Matter targets — they don't use notify groups)
         devices = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH):
+            if target.get(CONF_PROTOCOL) in (
+                PROTOCOL_ZHA,
+                PROTOCOL_MATTER,
+                PROTOCOL_ESPHOME,
+                PROTOCOL_BLUETOOTH,
+            ):
                 continue
             device_host = target[CONF_HOST]
             if device_host not in devices:
@@ -1636,7 +1968,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 devices[device_host] = {
                     "name": device_name,
                     "alert_group": target.get(CONF_ALERT_GROUP, DEFAULT_ALERT_GROUP),
-                    "alert_delay": target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+                    "alert_delay": target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
                 }
 
         if user_input is not None:
@@ -1645,17 +1977,24 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="device_select",
-            data_schema=vol.Schema({
-                vol.Required("device"): vol.In(
-                    dict(sorted(
-                        {host: f"{info['name']} ({host})" for host, info in devices.items()}.items(),
-                        key=lambda x: x[1].lower()
-                    ))
-                )
-            })
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device"): vol.In(
+                        dict(
+                            sorted(
+                                {
+                                    host: f"{info['name']} ({host})"
+                                    for host, info in devices.items()
+                                }.items(),
+                                key=lambda x: x[1].lower(),
+                            )
+                        )
+                    )
+                }
+            ),
         )
 
-    async def async_step_alert_config(self, user_input=None):
+    async def async_step_alert_config(self, user_input=None) -> ConfigFlowResult:
         """Second step of alert modification - alert settings configuration."""
         notify_groups = await self._async_get_notify_groups()
         alert_actions = await self._async_get_alert_actions()
@@ -1670,7 +2009,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     "alert_delay": target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
                     "alert_action_enabled": bool(target.get(CONF_ALERT_ACTION, "")),
                     "alert_action": target.get(CONF_ALERT_ACTION, ""),
-                    "alert_action_delay": target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
+                    "alert_action_delay": target.get(
+                        CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+                    ),
                 }
                 break
 
@@ -1679,7 +2020,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
             action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
-            alert_action = user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            alert_action = (
+                user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            )
             for target in self._targets:
                 if target[CONF_HOST] == self._selected_device:
                     if alert_group:
@@ -1691,13 +2034,14 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                         target[CONF_ALERT_ACTION] = alert_action
                     else:
                         target.pop(CONF_ALERT_ACTION, None)
-                    target[CONF_ALERT_ACTION_DELAY] = user_input[CONF_ALERT_ACTION_DELAY]
+                    target[CONF_ALERT_ACTION_DELAY] = user_input[
+                        CONF_ALERT_ACTION_DELAY
+                    ]
 
             # Update config entry with modified targets
             self.config_data[CONF_TARGETS] = self._targets
             self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                data=self.config_data
+                self.config_entry, data=self.config_data
             )
 
             await self.hass.config_entries.async_reload(self.config_entry.entry_id)
@@ -1708,38 +2052,54 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         notify_groups_dict[""] = "No alert group"
 
         schema = {
-            vol.Optional(CONF_ALERTS_ENABLED,
-                        default=current_settings["alerts_enabled"] if current_settings else False): bool,
-            vol.Optional(CONF_ALERT_GROUP,
-                        default=current_settings["alert_group"] if current_settings else ""): vol.In(
-                notify_groups_dict
-            ),
-            vol.Required(CONF_ALERT_DELAY,
-                        default=current_settings["alert_delay"] if current_settings else DEFAULT_ALERT_DELAY): vol.All(
-                vol.Coerce(int), vol.Range(min=1, max=60)
-            ),
-            vol.Optional(CONF_ALERT_ACTION_ENABLED,
-                        default=current_settings["alert_action_enabled"] if current_settings else False): bool,
-            vol.Required(CONF_ALERT_ACTION_DELAY,
-                        default=current_settings["alert_action_delay"] if current_settings else DEFAULT_ALERT_ACTION_DELAY): vol.All(
-                vol.Coerce(int), vol.Range(min=1, max=120)
-            ),
+            vol.Optional(
+                CONF_ALERTS_ENABLED,
+                default=current_settings["alerts_enabled"]
+                if current_settings
+                else False,
+            ): bool,
+            vol.Optional(
+                CONF_ALERT_GROUP,
+                default=current_settings["alert_group"] if current_settings else "",
+            ): vol.In(notify_groups_dict),
+            vol.Required(
+                CONF_ALERT_DELAY,
+                default=current_settings["alert_delay"]
+                if current_settings
+                else DEFAULT_ALERT_DELAY,
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
+            vol.Optional(
+                CONF_ALERT_ACTION_ENABLED,
+                default=current_settings["alert_action_enabled"]
+                if current_settings
+                else False,
+            ): bool,
+            vol.Required(
+                CONF_ALERT_ACTION_DELAY,
+                default=current_settings["alert_action_delay"]
+                if current_settings
+                else DEFAULT_ALERT_ACTION_DELAY,
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=120)),
         }
         if alert_actions:
-            actions_dict = {"" : "No action"}
+            actions_dict = {"": "No action"}
             actions_dict.update(alert_actions)
-            schema[vol.Optional(CONF_ALERT_ACTION,
-                    default=current_settings["alert_action"] if current_settings else "")] = vol.In(actions_dict)
+            schema[
+                vol.Optional(
+                    CONF_ALERT_ACTION,
+                    default=current_settings["alert_action"]
+                    if current_settings
+                    else "",
+                )
+            ] = vol.In(actions_dict)
 
         return self.async_show_form(
-            step_id="alert_config",
-            data_schema=vol.Schema(schema)
+            step_id="alert_config", data_schema=vol.Schema(schema)
         )
 
-    async def async_step_remove_device(self, user_input=None):
+    async def async_step_remove_device(self, user_input=None) -> ConfigFlowResult:
         """Handle removing a complete device."""
-        entity_registry = async_get_entity_registry(self.hass)
-        device_registry = async_get_device_registry(self.hass)
+        device_registry = dr.async_get(self.hass)
 
         if user_input is not None:
             device_host = user_input["device"]
@@ -1752,8 +2112,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # works regardless of whether the identifier uses a MAC or the host.
             device_ids = set()
             for device_entry in device_registry.devices.values():
-                if (device_entry.hw_version == device_host and
-                        any(i[0] == DOMAIN for i in device_entry.identifiers)):
+                if device_entry.hw_version == device_host and any(
+                    i[0] == DOMAIN for i in device_entry.identifiers
+                ):
                     device_ids.add(device_entry.id)
 
             # Remove devices — HA automatically removes their associated entities
@@ -1765,8 +2126,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # Update config entry
             self.config_data[CONF_TARGETS] = self._targets
             self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                data=self.config_data
+                self.config_entry, data=self.config_data
             )
 
             # Reload the config entry
@@ -1776,7 +2136,12 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         # Get unique network devices (ZHA/Matter/ESPHome devices are removed via their own step)
         devices = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH):
+            if target.get(CONF_PROTOCOL) in (
+                PROTOCOL_ZHA,
+                PROTOCOL_MATTER,
+                PROTOCOL_ESPHOME,
+                PROTOCOL_BLUETOOTH,
+            ):
                 continue
             device_name = target.get("device_name", target[CONF_HOST])
             devices[target[CONF_HOST]] = device_name
@@ -1786,19 +2151,26 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="remove_device",
-            data_schema=vol.Schema({
-                vol.Required("device"): vol.In(
-                    dict(sorted(
-                        {host: f"{name} ({host})" for host, name in devices.items()}.items(),
-                        key=lambda x: x[1].lower()
-                    ))
-                )
-            })
+            data_schema=vol.Schema(
+                {
+                    vol.Required("device"): vol.In(
+                        dict(
+                            sorted(
+                                {
+                                    host: f"{name} ({host})"
+                                    for host, name in devices.items()
+                                }.items(),
+                                key=lambda x: x[1].lower(),
+                            )
+                        )
+                    )
+                }
+            ),
         )
 
-    async def async_step_remove_sensor(self, user_input=None):
+    async def async_step_remove_sensor(self, user_input=None) -> ConfigFlowResult:
         """Handle removing a single sensor."""
-        entity_registry = async_get_entity_registry(self.hass)
+        entity_registry = er.async_get(self.hass)
 
         if user_input is not None:
             sensor_id = user_input["sensor"]
@@ -1811,7 +2183,9 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     break
 
             # Get all entities for this config entry
-            entry_entities = async_entries_for_config_entry(entity_registry, self.config_entry.entry_id)
+            entry_entities = er.async_entries_for_config_entry(
+                entity_registry, self.config_entry.entry_id
+            )
 
             # Find and remove the entity
             for entity_entry in entry_entities:
@@ -1821,8 +2195,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # Update config entry
             self.config_data[CONF_TARGETS] = self._targets
             self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                data=self.config_data
+                self.config_entry, data=self.config_data
             )
 
             # Reload the config entry
@@ -1832,11 +2205,18 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         # Create list of sensors with readable names (network sensors only)
         sensors = {}
         for target in self._targets:
-            if target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH):
+            if target.get(CONF_PROTOCOL) in (
+                PROTOCOL_ZHA,
+                PROTOCOL_MATTER,
+                PROTOCOL_ESPHOME,
+                PROTOCOL_BLUETOOTH,
+            ):
                 continue  # Shared-registry devices are removed via their own steps
             device_name = target.get("device_name", target[CONF_HOST])
             if target[CONF_PROTOCOL] in [PROTOCOL_TCP, PROTOCOL_UDP]:
-                sensor_name = f"{device_name} - {target[CONF_PROTOCOL]} {target[CONF_PORT]}"
+                sensor_name = (
+                    f"{device_name} - {target[CONF_PROTOCOL]} {target[CONF_PORT]}"
+                )
             else:
                 sensor_name = f"{device_name} - {target[CONF_PROTOCOL]}"
 
@@ -1848,14 +2228,16 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="remove_sensor",
-            data_schema=vol.Schema({
-                vol.Required("sensor"): vol.In(
-                    dict(sorted(sensors.items(), key=lambda x: x[1].lower()))
-                )
-            })
+            data_schema=vol.Schema(
+                {
+                    vol.Required("sensor"): vol.In(
+                        dict(sorted(sensors.items(), key=lambda x: x[1].lower()))
+                    )
+                }
+            ),
         )
 
-    async def async_step_modify_alerts(self, user_input=None):
+    async def async_step_modify_alerts(self, user_input=None) -> ConfigFlowResult:
         """Handle alert modifications."""
         notify_groups = await self._async_get_notify_groups()
 
@@ -1863,9 +2245,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_show_form(
                 step_id="modify_alerts",
                 errors={"base": "no_notify_groups"},
-                description_placeholders={
-                    "setup_link": "/config/integrations"
-                }
+                description_placeholders={"setup_link": "/config/integrations"},
             )
 
         # Get unique devices and their current alert settings
@@ -1877,7 +2257,7 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 devices[device_host] = {
                     "name": device_name,
                     "alert_group": target.get(CONF_ALERT_GROUP, DEFAULT_ALERT_GROUP),
-                    "alert_delay": target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+                    "alert_delay": target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY),
                 }
 
         if user_input is not None:
@@ -1893,41 +2273,43 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             # Update config entry with modified targets
             self.config_data[CONF_TARGETS] = self._targets
             self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                data=self.config_data
+                self.config_entry, data=self.config_data
             )
 
             await self.hass.config_entries.async_reload(self.config_entry.entry_id)
             return self.async_create_entry(title="", data={})
 
-        # If no device was selected yet, show the device selection form
-        selected_device = None
-        if user_input and "device" in user_input:
-            selected_device = devices[user_input["device"]]
-
         schema = {
             vol.Required("device"): vol.In(
-                dict(sorted(
-                    {host: f"{info['name']} ({host})" for host, info in devices.items()}.items(),
-                    key=lambda x: x[1].lower()
-                ))
+                dict(
+                    sorted(
+                        {
+                            host: f"{info['name']} ({host})"
+                            for host, info in devices.items()
+                        }.items(),
+                        key=lambda x: x[1].lower(),
+                    )
+                )
             ),
-            vol.Optional(CONF_ALERT_GROUP,
-                        default=selected_device["alert_group"] if selected_device else DEFAULT_ALERT_GROUP): vol.In(
-                {k: f"notify.{v}" for k, v in notify_groups.items()}
-            ),
-            vol.Required(CONF_ALERT_DELAY,
-                        default=selected_device["alert_delay"] if selected_device else DEFAULT_ALERT_DELAY): vol.All(
-                vol.Coerce(int), vol.Range(min=1, max=60)
-            )
+            vol.Optional(
+                CONF_ALERT_GROUP,
+                default=selected_device["alert_group"]
+                if selected_device
+                else DEFAULT_ALERT_GROUP,
+            ): vol.In({k: f"notify.{v}" for k, v in notify_groups.items()}),
+            vol.Required(
+                CONF_ALERT_DELAY,
+                default=selected_device["alert_delay"]
+                if selected_device
+                else DEFAULT_ALERT_DELAY,
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=60)),
         }
 
         return self.async_show_form(
-            step_id="modify_alerts",
-            data_schema=vol.Schema(schema)
+            step_id="modify_alerts", data_schema=vol.Schema(schema)
         )
 
-    async def async_step_zha_alert_select(self, user_input=None):
+    async def async_step_zha_alert_select(self, user_input=None) -> ConfigFlowResult:
         """Select which ZHA device to configure alerts for."""
         zha_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
         if not zha_targets:
@@ -1938,40 +2320,55 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return await self.async_step_zha_alert_config()
 
         devices = {
-            t[CONF_ZHA_IEEE]: f"{t.get('device_name', t[CONF_ZHA_IEEE])} ({t[CONF_ZHA_IEEE]})"
+            t[
+                CONF_ZHA_IEEE
+            ]: f"{t.get('device_name', t[CONF_ZHA_IEEE])} ({t[CONF_ZHA_IEEE]})"
             for t in sorted(zha_targets, key=lambda x: x.get("device_name", ""))
         }
         return self.async_show_form(
             step_id="zha_alert_select",
-            data_schema=vol.Schema({
-                vol.Required("ieee"): vol.In(devices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("ieee"): vol.In(devices),
+                }
+            ),
         )
 
-    async def async_step_zha_alert_config(self, user_input=None):
+    async def async_step_zha_alert_config(self, user_input=None) -> ConfigFlowResult:
         """Configure alert settings for the selected ZHA device."""
         notify_groups = await self._async_get_notify_groups()
         alert_actions = await self._async_get_alert_actions()
 
-        current_target = next(
-            (t for t in self._targets
-             if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee),
-            {}
+        current_target: dict[str, Any] = next(
+            (
+                t
+                for t in self._targets
+                if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+                and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee
+            ),
+            {},
         )
         current_alert_group = current_target.get(CONF_ALERT_GROUP, "")
         current_alert_delay = current_target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
         current_alerts_enabled = bool(current_alert_group)
         current_alert_action = current_target.get(CONF_ALERT_ACTION, "")
-        current_action_delay = current_target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+        current_action_delay = current_target.get(
+            CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+        )
         current_action_enabled = bool(current_alert_action)
 
         if user_input is not None:
             alerts_enabled = user_input.get(CONF_ALERTS_ENABLED, False)
             alert_group = user_input.get(CONF_ALERT_GROUP, "") if alerts_enabled else ""
             action_enabled = user_input.get(CONF_ALERT_ACTION_ENABLED, False)
-            alert_action = user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            alert_action = (
+                user_input.get(CONF_ALERT_ACTION, "") if action_enabled else ""
+            )
             for t in self._targets:
-                if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee:
+                if (
+                    t.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+                    and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee
+                ):
                     if alert_group:
                         t[CONF_ALERT_GROUP] = alert_group
                     else:
@@ -1994,27 +2391,33 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
         notify_groups_dict[""] = "No alert group"
         schema = {
             vol.Optional(CONF_ALERTS_ENABLED, default=current_alerts_enabled): bool,
-            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(notify_groups_dict),
+            vol.Optional(CONF_ALERT_GROUP, default=current_alert_group): vol.In(
+                notify_groups_dict
+            ),
             vol.Required(CONF_ALERT_DELAY, default=current_alert_delay): vol.All(
                 vol.Coerce(int), vol.Range(min=1, max=60)
             ),
-            vol.Optional(CONF_ALERT_ACTION_ENABLED, default=current_action_enabled): bool,
-            vol.Required(CONF_ALERT_ACTION_DELAY, default=current_action_delay): vol.All(
-                vol.Coerce(int), vol.Range(min=1, max=120)
-            ),
+            vol.Optional(
+                CONF_ALERT_ACTION_ENABLED, default=current_action_enabled
+            ): bool,
+            vol.Required(
+                CONF_ALERT_ACTION_DELAY, default=current_action_delay
+            ): vol.All(vol.Coerce(int), vol.Range(min=1, max=120)),
         }
         if alert_actions:
-            actions_dict = {"" : "No action"}
+            actions_dict = {"": "No action"}
             actions_dict.update(alert_actions)
-            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = vol.In(actions_dict)
+            schema[vol.Optional(CONF_ALERT_ACTION, default=current_alert_action)] = (
+                vol.In(actions_dict)
+            )
         return self.async_show_form(
             step_id="zha_alert_config",
             data_schema=vol.Schema(schema),
         )
 
-    async def async_step_remove_zha_device(self, user_input=None):
+    async def async_step_remove_zha_device(self, user_input=None) -> ConfigFlowResult:
         """Remove a monitored ZHA device."""
-        entity_registry = async_get_entity_registry(self.hass)
+        entity_registry = er.async_get(self.hass)
 
         zha_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
         if not zha_targets:
@@ -2025,15 +2428,19 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
             # Remove from targets list
             self._targets = [
-                t for t in self._targets
-                if not (t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == ieee)
+                t
+                for t in self._targets
+                if not (
+                    t.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+                    and t.get(CONF_ZHA_IEEE) == ieee
+                )
             ]
 
             # Only remove our monitoring entity — the ZHA device itself is
             # owned by the ZHA integration and must NOT be removed.
             ieee_clean = ieee.replace(":", "").replace("-", "")
             unique_id = f"connectivity_zha_{ieee_clean}"
-            entry_entities = async_entries_for_config_entry(
+            entry_entities = er.async_entries_for_config_entry(
                 entity_registry, self.config_entry.entry_id
             )
             for entity_entry in entry_entities:
@@ -2049,17 +2456,23 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data={})
 
         devices = {
-            t[CONF_ZHA_IEEE]: f"{t.get('device_name', t[CONF_ZHA_IEEE])} ({t[CONF_ZHA_IEEE]})"
+            t[
+                CONF_ZHA_IEEE
+            ]: f"{t.get('device_name', t[CONF_ZHA_IEEE])} ({t[CONF_ZHA_IEEE]})"
             for t in sorted(zha_targets, key=lambda x: x.get("device_name", ""))
         }
         return self.async_show_form(
             step_id="remove_zha_device",
-            data_schema=vol.Schema({
-                vol.Required("ieee"): vol.In(devices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("ieee"): vol.In(devices),
+                }
+            ),
         )
 
-    async def async_step_zha_select_for_timeout(self, user_input=None):
+    async def async_step_zha_select_for_timeout(
+        self, user_input=None
+    ) -> ConfigFlowResult:
         """Select which ZHA device to change the inactivity timeout for."""
         zha_targets = [t for t in self._targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
         if not zha_targets:
@@ -2070,27 +2483,37 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
             return await self.async_step_zha_update_timeout()
 
         devices = {
-            t[CONF_ZHA_IEEE]: f"{t.get('device_name', t[CONF_ZHA_IEEE])} ({t[CONF_ZHA_IEEE]})"
+            t[
+                CONF_ZHA_IEEE
+            ]: f"{t.get('device_name', t[CONF_ZHA_IEEE])} ({t[CONF_ZHA_IEEE]})"
             for t in sorted(zha_targets, key=lambda x: x.get("device_name", ""))
         }
         return self.async_show_form(
             step_id="zha_select_for_timeout",
-            data_schema=vol.Schema({
-                vol.Required("ieee"): vol.In(devices),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required("ieee"): vol.In(devices),
+                }
+            ),
         )
 
-    async def async_step_zha_update_timeout(self, user_input=None):
+    async def async_step_zha_update_timeout(self, user_input=None) -> ConfigFlowResult:
         """Update the inactivity timeout for the selected ZHA device."""
         current_timeout = DEFAULT_INACTIVE_TIMEOUT
         for t in self._targets:
-            if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee:
+            if (
+                t.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+                and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee
+            ):
                 current_timeout = t.get(CONF_INACTIVE_TIMEOUT, DEFAULT_INACTIVE_TIMEOUT)
                 break
 
         if user_input is not None:
             for t in self._targets:
-                if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee:
+                if (
+                    t.get(CONF_PROTOCOL) == PROTOCOL_ZHA
+                    and t.get(CONF_ZHA_IEEE) == self._zha_selected_ieee
+                ):
                     t[CONF_INACTIVE_TIMEOUT] = user_input[CONF_INACTIVE_TIMEOUT]
 
             self.config_data[CONF_TARGETS] = self._targets
@@ -2102,49 +2525,42 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
 
         return self.async_show_form(
             step_id="zha_update_timeout",
-            data_schema=vol.Schema({
-                vol.Required(CONF_INACTIVE_TIMEOUT, default=current_timeout): vol.All(
-                    vol.Coerce(int), vol.Range(min=5, max=1440)
-                ),
-            }),
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_INACTIVE_TIMEOUT, default=current_timeout
+                    ): vol.All(vol.Coerce(int), vol.Range(min=5, max=1440)),
+                }
+            ),
         )
 
-    async def async_step_settings(self, user_input=None):
+    async def async_step_settings(self, user_input=None) -> ConfigFlowResult:
         """Handle changing general settings."""
         if user_input is not None:
             self.config_data[CONF_INTERVAL] = user_input[CONF_INTERVAL]
             self.config_data[CONF_DNS_SERVER] = user_input[CONF_DNS_SERVER]
 
             self.hass.config_entries.async_update_entry(
-                self.config_entry,
-                data=self.config_data
+                self.config_entry, data=self.config_data
             )
             await self.hass.config_entries.async_reload(self.config_entry.entry_id)
             return self.async_create_entry(title="", data={})
 
         schema = {
-            vol.Required(CONF_INTERVAL,
-                        default=self.config_data[CONF_INTERVAL]): vol.All(
-                vol.Coerce(int), vol.Range(min=5, max=300)
-            ),
-            vol.Required(CONF_DNS_SERVER,
-                        default=self.config_data[CONF_DNS_SERVER]): str,
+            vol.Required(
+                CONF_INTERVAL, default=self.config_data[CONF_INTERVAL]
+            ): vol.All(vol.Coerce(int), vol.Range(min=5, max=300)),
+            vol.Required(
+                CONF_DNS_SERVER, default=self.config_data[CONF_DNS_SERVER]
+            ): str,
         }
 
-        return self.async_show_form(
-            step_id="settings",
-            data_schema=vol.Schema(schema)
-        )
+        return self.async_show_form(step_id="settings", data_schema=vol.Schema(schema))
 
-    async def async_step_cleanup_orphans(self, user_input=None):
+    async def async_step_cleanup_orphans(self, user_input=None) -> ConfigFlowResult:
         """Remove devices registered under this integration that have no entities."""
-        from homeassistant.helpers.entity_registry import (
-            async_entries_for_device,
-            async_get as async_get_er,
-        )
-
-        entity_registry = async_get_er(self.hass)
-        device_registry = async_get_device_registry(self.hass)
+        entity_registry = er.async_get(self.hass)
+        device_registry = dr.async_get(self.hass)
         entry_id = self.config_entry.entry_id
 
         removed = []
@@ -2154,7 +2570,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                 continue
             # Check whether any entity still belongs to our config entry
             entry_entities = [
-                e for e in async_entries_for_device(entity_registry, device_entry.id)
+                e
+                for e in er.async_entries_for_device(entity_registry, device_entry.id)
                 if e.config_entry_id == entry_id
             ]
             if not entry_entities:
@@ -2169,8 +2586,8 @@ class OptionsFlowHandler(config_entries.OptionsFlow):
                     )
 
         if removed:
-            _LOGGER.info("Connectivity Monitor: cleaned up orphaned devices: %s", removed)
+            _LOGGER.info(
+                "Connectivity Monitor: cleaned up orphaned devices: %s", removed
+            )
 
-        return self.async_abort(
-            reason="cleanup_done"
-        )
+        return self.async_abort(reason="cleanup_done")

@@ -1,145 +1,168 @@
-from __future__ import annotations
-import asyncio
-from datetime import timedelta
-import logging
-from ipaddress import ip_address as _parse_ip_address
-from typing import Any
-from datetime import datetime
-from homeassistant.core import callback
-from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.helpers.event import async_track_time_interval
-from homeassistant.const import STATE_UNKNOWN
-from homeassistant.components.sensor import SensorEntity
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.entity import DeviceInfo, EntityCategory
-from homeassistant.helpers.update_coordinator import (
-    CoordinatorEntity,
-    DataUpdateCoordinator,
-)
-from homeassistant.helpers.entity_registry import (
-    async_entries_for_config_entry,
-    async_get as async_get_entity_registry,
-    async_entries_for_device,
-)
-from homeassistant.helpers.device_registry import async_get as async_get_device_registry
+"""Sensor platform for Connectivity Monitor integration."""
 
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from ipaddress import ip_address as _parse_ip_address
+import logging
+from typing import Any
+
+from homeassistant.components.sensor import SensorEntity
+from homeassistant.const import STATE_UNKNOWN, EntityCategory
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
+from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.event import (
+    async_track_state_change_event,
+    async_track_time_interval,
+)
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from . import (
+    bluetooth as bluetooth_helpers,
+    esphome as esphome_helpers,
+    matter as matter_helpers,
+    network as network_helpers,
+    zha as zha_helpers,
+)
 from .const import (
-    DOMAIN,
-    VERSION,
-    CONF_HOST,
-    CONF_PROTOCOL,
-    CONF_PORT,
-    CONF_INTERVAL,
-    CONF_TARGETS,
-    CONF_DNS_SERVER,
-    CONF_ALERT_GROUP,
-    CONF_ALERT_DELAY,
-    DEFAULT_ALERT_DELAY,
+    AD_DC_PORTS,
     CONF_ALERT_ACTION,
     CONF_ALERT_ACTION_DELAY,
-    DEFAULT_ALERT_ACTION_DELAY,
-    PROTOCOL_ICMP,
-    PROTOCOL_AD_DC,
-    PROTOCOL_TCP,
-    PROTOCOL_UDP,
-    PROTOCOL_ZHA,
-    PROTOCOL_MATTER,
-    PROTOCOL_ESPHOME,
-    PROTOCOL_BLUETOOTH,
-    CONF_ZHA_IEEE,
-    CONF_INACTIVE_TIMEOUT,
-    DEFAULT_INACTIVE_TIMEOUT,
-    CONF_MATTER_NODE_ID,
-    CONF_ESPHOME_DEVICE_ID,
+    CONF_ALERT_DELAY,
+    CONF_ALERT_GROUP,
     CONF_BLUETOOTH_ADDRESS,
-    AD_DC_PORTS
+    CONF_ESPHOME_DEVICE_ID,
+    CONF_HOST,
+    CONF_INACTIVE_TIMEOUT,
+    CONF_MATTER_NODE_ID,
+    CONF_PORT,
+    CONF_PROTOCOL,
+    CONF_TARGETS,
+    CONF_ZHA_IEEE,
+    DEFAULT_ALERT_ACTION_DELAY,
+    DEFAULT_ALERT_DELAY,
+    DEFAULT_INACTIVE_TIMEOUT,
+    DOMAIN,
+    NON_NETWORK_PROTOCOLS,
+    PROTOCOL_AD_DC,
+    PROTOCOL_BLUETOOTH,
+    PROTOCOL_ESPHOME,
+    PROTOCOL_ICMP,
+    PROTOCOL_MATTER,
+    PROTOCOL_TCP,
+    PROTOCOL_ZHA,
+    VERSION,
 )
-from .network import NetworkProbe
+from .coordinator import ConnectivityMonitorConfigEntry, ConnectivityMonitorCoordinator
+
+NetworkProbe = network_helpers.NetworkProbe
+async_get_bluetooth_device_details = (
+    bluetooth_helpers.async_get_bluetooth_device_details
+)
+async_get_esphome_device_active = esphome_helpers.async_get_esphome_device_active
+async_get_matter_device_active = matter_helpers.async_get_matter_device_active
+async_get_zha_device_last_seen = zha_helpers.async_get_zha_device_last_seen
 
 _LOGGER = logging.getLogger(__name__)
 
-async def async_setup_entry(
+
+async def async_setup_entry(  # noqa: C901
     hass: HomeAssistant,
-    entry: ConfigEntry,
-    async_add_entities: AddEntitiesCallback,
+    entry: ConnectivityMonitorConfigEntry,
+    async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up the Connectivity Monitor sensors."""
-    _LOGGER.debug("Starting setup of Connectivity Monitor entry with data: %s", entry.data)
+    _LOGGER.debug(
+        "Starting setup of Connectivity Monitor entry with data: %s", entry.data
+    )
 
     config_data = dict(entry.data)
     targets = config_data[CONF_TARGETS]
-    update_interval = config_data[CONF_INTERVAL]
-    dns_server = config_data[CONF_DNS_SERVER]
-
-    _LOGGER.debug("Processing configuration - Update interval: %s, DNS Server: %s",
-                 update_interval, dns_server)
     _LOGGER.debug("Targets to process: %s", targets)
 
     # Separate ZHA targets from regular network targets
-    network_targets = [t for t in targets if t.get(CONF_PROTOCOL) not in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH)]
+    network_targets = [
+        t for t in targets if t.get(CONF_PROTOCOL) not in NON_NETWORK_PROTOCOLS
+    ]
     zha_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_ZHA]
     matter_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_MATTER]
     esphome_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_ESPHOME]
-    bluetooth_targets = [t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH]
+    bluetooth_targets = [
+        t for t in targets if t.get(CONF_PROTOCOL) == PROTOCOL_BLUETOOTH
+    ]
 
-    # Create alert handler
-    alert_handler = AlertHandler(hass)
-    hass.data[DOMAIN][entry.entry_id]["alert_handler"] = alert_handler
-
-    coordinator = ConnectivityMonitorCoordinator(
-        hass,
-        targets,
-        update_interval,
-        dns_server,
-        entry.entry_id,
-    )
-    await coordinator.async_config_entry_first_refresh()
-    hass.data[DOMAIN][entry.entry_id]["coordinator"] = coordinator
+    coordinator = entry.runtime_data.coordinator
+    alert_handler = entry.runtime_data.alert_handler
 
     # Get existing entities
-    entity_registry = async_get_entity_registry(hass)
-    existing_entities = async_entries_for_config_entry(entity_registry, entry.entry_id)
-    new_unique_ids = set()
-    entities = []
+    entity_registry = er.async_get(hass)
+    existing_entities = er.async_entries_for_config_entry(
+        entity_registry, entry.entry_id
+    )
+    new_unique_ids: set[str] = set()
+    entities: list[SensorEntity] = []
 
     # Group network targets by host
-    host_targets = {}
+    host_targets: dict[str, list[dict]] = {}
     for target in network_targets:
         host = target[CONF_HOST]
         if host not in host_targets:
             host_targets[host] = []
         host_targets[host].append(target)
 
-    _LOGGER.debug("Grouped targets by host: %s",
-                 {host: [t.get(CONF_PROTOCOL) for t in targets] for host, targets in host_targets.items()})
+    _LOGGER.debug(
+        "Grouped targets by host: %s",
+        {
+            host: [t.get(CONF_PROTOCOL) for t in targets]
+            for host, targets in host_targets.items()
+        },
+    )
 
     # Process each network host
     for host, host_target_list in host_targets.items():
-        _LOGGER.debug("Processing host %s with targets: %s",
-                     host, [f"{t[CONF_PROTOCOL]}:{t.get(CONF_PORT, 'N/A')}" for t in host_target_list])
+        _LOGGER.debug(
+            "Processing host %s with targets: %s",
+            host,
+            [f"{t[CONF_PROTOCOL]}:{t.get(CONF_PORT, 'N/A')}" for t in host_target_list],
+        )
 
         ad_targets = []
 
         # Create sensors for each target
         for target in host_target_list:
             try:
-                _LOGGER.debug("Creating individual sensor for target: Protocol=%s, Port=%s",
-                            target[CONF_PROTOCOL], target.get(CONF_PORT, 'N/A'))
+                _LOGGER.debug(
+                    "Creating individual sensor for target: Protocol=%s, Port=%s",
+                    target[CONF_PROTOCOL],
+                    target.get(CONF_PORT, "N/A"),
+                )
 
-                if target[CONF_PROTOCOL] == PROTOCOL_TCP and target.get(CONF_PORT) in AD_DC_PORTS:
-                    _LOGGER.debug("Adding target to AD overview for port %s", target.get(CONF_PORT))
+                if (
+                    target[CONF_PROTOCOL] == PROTOCOL_TCP
+                    and target.get(CONF_PORT) in AD_DC_PORTS
+                ):
+                    _LOGGER.debug(
+                        "Adding target to AD overview for port %s",
+                        target.get(CONF_PORT),
+                    )
                     ad_targets.append(target)
 
                 sensor = ConnectivitySensor(coordinator, target)
                 entities.append(sensor)
-                new_unique_ids.add(sensor.unique_id)
-                _LOGGER.debug("Created individual sensor: entity_id=%s, unique_id=%s",
-                            sensor.entity_id, sensor.unique_id)
+                if sensor.unique_id is not None:
+                    new_unique_ids.add(sensor.unique_id)
+                _LOGGER.debug(
+                    "Created individual sensor: entity_id=%s, unique_id=%s",
+                    sensor.entity_id,
+                    sensor.unique_id,
+                )
 
-            except Exception as err:
-                _LOGGER.exception("Error creating individual sensor for target %s: %s", target, err)
+            except Exception:
+                _LOGGER.exception(
+                    "Error creating individual sensor for target %s", target
+                )
 
         # Create overview sensors
         if host_target_list:
@@ -150,100 +173,136 @@ async def async_setup_entry(
                 _LOGGER.debug("Creating overview sensor for device: %s", device_name)
                 overview = OverviewSensor(coordinator, first_target, host_target_list)
                 entities.append(overview)
-                new_unique_ids.add(overview.unique_id)
-                _LOGGER.debug("Created overview sensor: entity_id=%s, unique_id=%s",
-                            overview.entity_id, overview.unique_id)
+                if overview.unique_id is not None:
+                    new_unique_ids.add(overview.unique_id)
+                _LOGGER.debug(
+                    "Created overview sensor: entity_id=%s, unique_id=%s",
+                    overview.entity_id,
+                    overview.unique_id,
+                )
 
                 # Pass alert_handler into overview sensor so it can self-register
                 # in async_added_to_hass using its final HA-assigned entity_id.
-                overview._alert_handler = alert_handler
+                overview._alert_handler = alert_handler  # noqa: SLF001
 
                 # Create AD overview if needed
                 if ad_targets:
-                    _LOGGER.debug("Creating AD overview sensor with %d AD targets",
-                                len(ad_targets))
-                    ad_overview = ADOverviewSensor(coordinator, first_target, ad_targets)
+                    _LOGGER.debug(
+                        "Creating AD overview sensor with %d AD targets",
+                        len(ad_targets),
+                    )
+                    ad_overview = ADOverviewSensor(
+                        coordinator, first_target, ad_targets
+                    )
                     entities.append(ad_overview)
-                    new_unique_ids.add(ad_overview.unique_id)
-                    _LOGGER.debug("Created AD overview sensor: entity_id=%s, unique_id=%s",
-                                ad_overview.entity_id, ad_overview.unique_id)
+                    if ad_overview.unique_id is not None:
+                        new_unique_ids.add(ad_overview.unique_id)
+                    _LOGGER.debug(
+                        "Created AD overview sensor: entity_id=%s, unique_id=%s",
+                        ad_overview.entity_id,
+                        ad_overview.unique_id,
+                    )
 
-            except Exception as err:
-                _LOGGER.exception("Error creating overview sensors for host %s: %s", host, err)
+            except Exception:
+                _LOGGER.exception("Error creating overview sensors for host %s", host)
 
-        _LOGGER.debug("Completed processing for host %s. Created %d sensors", host, len(entities))
+        _LOGGER.debug(
+            "Completed processing for host %s. Created %d sensors", host, len(entities)
+        )
 
     # Process ZHA device targets
     for target in zha_targets:
         try:
-            sensor = ZHASensor(coordinator, target)
-            entities.append(sensor)
-            new_unique_ids.add(sensor.unique_id)
-            _LOGGER.debug("Created ZHA sensor: entity_id=%s, unique_id=%s",
-                         sensor.entity_id, sensor.unique_id)
+            zha_sensor = ZHASensor(coordinator, target)
+            entities.append(zha_sensor)
+            if zha_sensor.unique_id is not None:
+                new_unique_ids.add(zha_sensor.unique_id)
+            _LOGGER.debug(
+                "Created ZHA sensor: entity_id=%s, unique_id=%s",
+                zha_sensor.entity_id,
+                zha_sensor.unique_id,
+            )
             # Pass alert_handler into ZHA sensor so it can self-register in
             # async_added_to_hass using its final HA-assigned entity_id.
-            sensor._alert_handler = alert_handler
-        except Exception as err:
-            _LOGGER.exception("Error creating ZHA sensor for target %s: %s", target, err)
+            zha_sensor._alert_handler = alert_handler  # noqa: SLF001
+        except Exception:
+            _LOGGER.exception("Error creating ZHA sensor for target %s", target)
 
     # Process Matter device targets
     for target in matter_targets:
         try:
-            sensor = MatterSensor(coordinator, target)
-            entities.append(sensor)
-            new_unique_ids.add(sensor.unique_id)
-            _LOGGER.debug("Created Matter sensor: entity_id=%s, unique_id=%s",
-                         sensor.entity_id, sensor.unique_id)
-            sensor._alert_handler = alert_handler
-        except Exception as err:
-            _LOGGER.exception("Error creating Matter sensor for target %s: %s", target, err)
+            matter_sensor = MatterSensor(coordinator, target)
+            entities.append(matter_sensor)
+            if matter_sensor.unique_id is not None:
+                new_unique_ids.add(matter_sensor.unique_id)
+            _LOGGER.debug(
+                "Created Matter sensor: entity_id=%s, unique_id=%s",
+                matter_sensor.entity_id,
+                matter_sensor.unique_id,
+            )
+            matter_sensor._alert_handler = alert_handler  # noqa: SLF001
+        except Exception:
+            _LOGGER.exception("Error creating Matter sensor for target %s", target)
 
     # Process ESPHome device targets
     for target in esphome_targets:
         try:
-            sensor = ESPHomeSensor(coordinator, target)
-            entities.append(sensor)
-            new_unique_ids.add(sensor.unique_id)
-            _LOGGER.debug("Created ESPHome sensor: entity_id=%s, unique_id=%s",
-                         sensor.entity_id, sensor.unique_id)
-            sensor._alert_handler = alert_handler
-        except Exception as err:
-            _LOGGER.exception("Error creating ESPHome sensor for target %s: %s", target, err)
+            esphome_sensor = ESPHomeSensor(coordinator, target)
+            entities.append(esphome_sensor)
+            if esphome_sensor.unique_id is not None:
+                new_unique_ids.add(esphome_sensor.unique_id)
+            _LOGGER.debug(
+                "Created ESPHome sensor: entity_id=%s, unique_id=%s",
+                esphome_sensor.entity_id,
+                esphome_sensor.unique_id,
+            )
+            esphome_sensor._alert_handler = alert_handler  # noqa: SLF001
+        except Exception:
+            _LOGGER.exception("Error creating ESPHome sensor for target %s", target)
 
     # Process Bluetooth device targets
     for target in bluetooth_targets:
         try:
-            sensor = BluetoothSensor(coordinator, target)
-            entities.append(sensor)
-            new_unique_ids.add(sensor.unique_id)
-            _LOGGER.debug("Created Bluetooth sensor: entity_id=%s, unique_id=%s",
-                         sensor.entity_id, sensor.unique_id)
-            sensor._alert_handler = alert_handler
-        except Exception as err:
-            _LOGGER.exception("Error creating Bluetooth sensor for target %s: %s", target, err)
+            bt_sensor = BluetoothSensor(coordinator, target)
+            entities.append(bt_sensor)
+            if bt_sensor.unique_id is not None:
+                new_unique_ids.add(bt_sensor.unique_id)
+            _LOGGER.debug(
+                "Created Bluetooth sensor: entity_id=%s, unique_id=%s",
+                bt_sensor.entity_id,
+                bt_sensor.unique_id,
+            )
+            bt_sensor._alert_handler = alert_handler  # noqa: SLF001
+        except Exception:
+            _LOGGER.exception("Error creating Bluetooth sensor for target %s", target)
 
     # Remove old entities
     for entity in existing_entities:
         if entity.unique_id not in new_unique_ids:
-            _LOGGER.debug("Removing old entity: %s (unique_id: %s)", entity.entity_id, entity.unique_id)
+            _LOGGER.debug(
+                "Removing old entity: %s (unique_id: %s)",
+                entity.entity_id,
+                entity.unique_id,
+            )
             entity_registry.async_remove(entity.entity_id)
 
     # Remove orphaned devices — any device that references this config entry
     # but has no remaining entities belonging to it. This covers both our own
     # DOMAIN devices (network monitors) and shared devices (ZHA/Matter) where
     # our diagnostic sensor was removed but the config-entry link was not.
-    device_registry = async_get_device_registry(hass)
+    device_registry = dr.async_get(hass)
     for device_entry in list(device_registry.devices.values()):
         if entry.entry_id not in device_entry.config_entries:
             continue
         entry_entity_ids = {
             e.entity_id
-            for e in async_entries_for_device(entity_registry, device_entry.id)
+            for e in er.async_entries_for_device(entity_registry, device_entry.id)
             if e.config_entry_id == entry.entry_id
         }
         if not entry_entity_ids:
-            _LOGGER.debug("Removing orphaned device: %s (%s)", device_entry.name, device_entry.id)
+            _LOGGER.debug(
+                "Removing orphaned device: %s (%s)", device_entry.name, device_entry.id
+            )
             if device_entry.config_entries == {entry.entry_id}:
                 # Only our integration owns this device — safe to delete entirely.
                 device_registry.async_remove_device(device_entry.id)
@@ -254,8 +313,10 @@ async def async_setup_entry(
                     device_entry.id, remove_config_entry_id=entry.entry_id
                 )
 
-    _LOGGER.debug("Final entities to be added: %s",
-                 [{"entity_id": e.entity_id, "unique_id": e.unique_id} for e in entities])
+    _LOGGER.debug(
+        "Final entities to be added: %s",
+        [{"entity_id": e.entity_id, "unique_id": e.unique_id} for e in entities],
+    )
 
     if entities:
         _LOGGER.debug("Adding %d entities to Home Assistant", len(entities))
@@ -263,36 +324,36 @@ async def async_setup_entry(
     else:
         _LOGGER.error("No entities were created during setup!")
 
+
 class AlertHandler:
     """Handle alert notifications for connectivity status."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         """Initialize the alert handler."""
         self.hass = hass
-        self._last_disconnected = {}
-        self._notified = {}
-        self._action_fired = {}
-        self._callbacks = {}
-        self._targets = {}  # Store target info for each entity
+        self._last_disconnected: dict[str, datetime | None] = {}
+        self._notified: dict[str, bool] = {}
+        self._action_fired: dict[str, bool] = {}
+        self._callbacks: dict[str, Any] = {}
+        self._targets: dict[str, dict] = {}  # Store target info for each entity
         # Tracks the timestamp when a device first entered a recovery state.
         # We require the recovery to persist for at least one full timer cycle
         # before clearing alert tracking, so brief false-positive "Connected"
         # states don't reset the alert delay countdown.
         self._recovering_since: dict = {}
-        self._check_timer = None
+        self._check_timer: Any = None
         self._setup_alert_timer()
         _LOGGER.debug("AlertHandler initialized")
 
     def _setup_alert_timer(self) -> None:
         """Set up periodic timer to check alerts."""
+
         async def async_check(_now=None):
             """Wrapper for async check."""
             await self._check_alerts()
 
         self._check_timer = async_track_time_interval(
-            self.hass,
-            async_check,
-            timedelta(minutes=1)
+            self.hass, async_check, timedelta(minutes=1)
         )
 
     async def async_cleanup(self) -> None:
@@ -304,7 +365,7 @@ class AlertHandler:
             unsubscribe()
         self._callbacks.clear()
 
-    async def _check_alerts(self) -> None:
+    async def _check_alerts(self) -> None:  # noqa: C901
         """Check all monitored entities for alerts."""
         current_time = datetime.now()
 
@@ -316,8 +377,17 @@ class AlertHandler:
             if eid in self._last_disconnected:
                 continue
             is_zha_chk = tgt.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-            is_inactive_chk = tgt.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH)
-            problem_states_chk = ["Inactive"] if is_inactive_chk else ["Disconnected", "Not Connected", "Partially Connected"]
+            is_inactive_chk = tgt.get(CONF_PROTOCOL) in (
+                PROTOCOL_ZHA,
+                PROTOCOL_MATTER,
+                PROTOCOL_ESPHOME,
+                PROTOCOL_BLUETOOTH,
+            )
+            problem_states_chk = (
+                ["Inactive"]
+                if is_inactive_chk
+                else ["Disconnected", "Not Connected", "Partially Connected"]
+            )
             cur_state = self.hass.states.get(eid)
             if cur_state and cur_state.state in problem_states_chk:
                 self._last_disconnected[eid] = current_time
@@ -342,11 +412,22 @@ class AlertHandler:
         for entity_id, disconnect_time in list(self._last_disconnected.items()):
             if entity_id not in self._targets:
                 continue
+            if disconnect_time is None:
+                continue
 
             target = self._targets[entity_id]
             is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-            is_inactive = target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH)
-            problem_states = ["Inactive"] if is_inactive else ["Disconnected", "Not Connected", "Partially Connected"]
+            is_inactive = target.get(CONF_PROTOCOL) in (
+                PROTOCOL_ZHA,
+                PROTOCOL_MATTER,
+                PROTOCOL_ESPHOME,
+                PROTOCOL_BLUETOOTH,
+            )
+            problem_states = (
+                ["Inactive"]
+                if is_inactive
+                else ["Disconnected", "Not Connected", "Partially Connected"]
+            )
             recovery_state = "Active" if is_inactive else "Connected"
             if target.get(CONF_PROTOCOL) == PROTOCOL_MATTER:
                 identifier = target.get(CONF_MATTER_NODE_ID, target[CONF_HOST])
@@ -371,32 +452,44 @@ class AlertHandler:
                     self._recovering_since.pop(entity_id, None)
                     _LOGGER.info(
                         "Connectivity Monitor: %s dropped back to '%s' — recovery cancelled",
-                        device_name, current_state,
+                        device_name,
+                        current_state,
                     )
                 else:
-                    recovery_held = (current_time - self._recovering_since[entity_id]).total_seconds()
+                    recovery_held = (
+                        current_time - self._recovering_since[entity_id]
+                    ).total_seconds()
                     if recovery_held >= 60:
                         _LOGGER.info(
                             "Connectivity Monitor: recovery confirmed for %s after %.0fs",
-                            device_name, recovery_held,
+                            device_name,
+                            recovery_held,
                         )
                         cur_alert_group = target.get(CONF_ALERT_GROUP)
                         cur_alert_action = target.get(CONF_ALERT_ACTION)
                         recover_label = "active again" if is_inactive else "connected"
                         if self._notified.get(entity_id) and cur_alert_group:
                             message = f"✅ Device {device_name} ({identifier}) has recovered and is now {recover_label}"
-                            await self._async_send_notification(cur_alert_group, message)
+                            await self._async_send_notification(
+                                cur_alert_group, message
+                            )
                         if self._action_fired.get(entity_id) and cur_alert_action:
-                            offline_minutes = (current_time - disconnect_time).total_seconds() / 60
+                            offline_minutes = (
+                                current_time - disconnect_time
+                            ).total_seconds() / 60
                             recovery_variables = {
                                 "device_name": device_name,
                                 "device_address": identifier,
-                                "last_online": disconnect_time.strftime("%Y-%m-%d %H:%M:%S"),
+                                "last_online": disconnect_time.strftime(
+                                    "%Y-%m-%d %H:%M:%S"
+                                ),
                                 "minutes_offline": int(offline_minutes),
                                 "hours_offline": round(offline_minutes / 60, 1),
                                 "recovered": True,
                             }
-                            await self._async_trigger_action(cur_alert_action, recovery_variables)
+                            await self._async_trigger_action(
+                                cur_alert_action, recovery_variables
+                            )
                         self._last_disconnected.pop(entity_id, None)
                         self._recovering_since.pop(entity_id, None)
                         self._notified[entity_id] = False
@@ -404,14 +497,17 @@ class AlertHandler:
                     else:
                         _LOGGER.info(
                             "Connectivity Monitor: %s recovery pending (%.0fs / 60s held)",
-                            device_name, recovery_held,
+                            device_name,
+                            recovery_held,
                         )
                 continue
 
             _LOGGER.info(
                 "Connectivity Monitor: timer — %s state='%s' elapsed=%.1f min "
                 "(action_delay=%s min, action=%s, action_fired=%s)",
-                device_name, current_state, elapsed_minutes,
+                device_name,
+                current_state,
+                elapsed_minutes,
                 target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY),
                 target.get(CONF_ALERT_ACTION, "none"),
                 self._action_fired.get(entity_id, False),
@@ -447,22 +543,37 @@ class AlertHandler:
                     )
                     await self._async_send_notification(alert_group, message)
                     self._notified[entity_id] = True
-                    _LOGGER.debug("Notification sent for %s after %.1f minutes", device_name, elapsed_minutes)
+                    _LOGGER.debug(
+                        "Notification sent for %s after %.1f minutes",
+                        device_name,
+                        elapsed_minutes,
+                    )
 
             # Action alert
             if not self._action_fired.get(entity_id, False):
                 alert_action = target.get(CONF_ALERT_ACTION)
-                action_delay = target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+                action_delay = target.get(
+                    CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+                )
                 _LOGGER.info(
                     "Connectivity Monitor: action check for %s — action='%s' elapsed=%.1f delay=%s",
-                    device_name, alert_action or "none", elapsed_minutes, action_delay,
+                    device_name,
+                    alert_action or "none",
+                    elapsed_minutes,
+                    action_delay,
                 )
                 if alert_action and elapsed_minutes >= action_delay:
                     await self._async_trigger_action(alert_action, context_variables)
                     self._action_fired[entity_id] = True
-                    _LOGGER.info("Connectivity Monitor: action triggered for %s after %.1f minutes", device_name, elapsed_minutes)
+                    _LOGGER.info(
+                        "Connectivity Monitor: action triggered for %s after %.1f minutes",
+                        device_name,
+                        elapsed_minutes,
+                    )
 
-    async def _async_trigger_action(self, action_entity_id: str, variables: dict | None = None) -> None:
+    async def _async_trigger_action(
+        self, action_entity_id: str, variables: dict | None = None
+    ) -> None:
         """Trigger an automation or script via a custom event so variables are accessible."""
         try:
             event_type = "connectivity_monitor_alert"
@@ -471,11 +582,14 @@ class AlertHandler:
 
             _LOGGER.warning(
                 "Connectivity Monitor: firing event '%s' with data %s",
-                event_type, event_data
+                event_type,
+                event_data,
             )
             self.hass.bus.async_fire(event_type, event_data)
-            _LOGGER.info("Connectivity Monitor: event '%s' fired successfully", event_type)
-        except Exception as err:
+            _LOGGER.info(
+                "Connectivity Monitor: event '%s' fired successfully", event_type
+            )
+        except (OSError, ValueError) as err:
             _LOGGER.error("Connectivity Monitor: failed to fire event: %s", str(err))
 
     async def _async_send_notification(self, service: str, message: str) -> None:
@@ -495,8 +609,10 @@ class AlertHandler:
                 blocking=True,
             )
             _LOGGER.debug("Successfully sent notification")
-        except Exception as err:
-            _LOGGER.error("Failed to send notification using service %s: %s", service, str(err))
+        except (OSError, ValueError) as err:
+            _LOGGER.error(
+                "Failed to send notification using service %s: %s", service, str(err)
+            )
 
     async def async_setup_alerts(self, entity_id: str, target: dict) -> None:
         """Set up alerts for a sensor."""
@@ -526,7 +642,7 @@ class AlertHandler:
         async def async_handle_state_change(event) -> None:
             """Handle state changes for an entity."""
             # Handle both real events and our simulated initial state check
-            if hasattr(event, 'data'):
+            if hasattr(event, "data"):
                 new_state = event.data.get("new_state")
                 old_state = event.data.get("old_state")
             else:
@@ -538,8 +654,17 @@ class AlertHandler:
 
             current_time = datetime.now()
             is_zha = target.get(CONF_PROTOCOL) == PROTOCOL_ZHA
-            is_inactive = target.get(CONF_PROTOCOL) in (PROTOCOL_ZHA, PROTOCOL_MATTER, PROTOCOL_ESPHOME, PROTOCOL_BLUETOOTH)
-            problem_states = ["Inactive"] if is_inactive else ["Disconnected", "Not Connected", "Partially Connected"]
+            is_inactive = target.get(CONF_PROTOCOL) in (
+                PROTOCOL_ZHA,
+                PROTOCOL_MATTER,
+                PROTOCOL_ESPHOME,
+                PROTOCOL_BLUETOOTH,
+            )
+            problem_states = (
+                ["Inactive"]
+                if is_inactive
+                else ["Disconnected", "Not Connected", "Partially Connected"]
+            )
             recovery_state = "Active" if is_inactive else "Connected"
             if target.get(CONF_PROTOCOL) == PROTOCOL_MATTER:
                 identifier = target.get(CONF_MATTER_NODE_ID, target[CONF_HOST])
@@ -568,7 +693,7 @@ class AlertHandler:
                         "Connectivity Monitor: started tracking %s as %s since %s",
                         device_name,
                         new_state.state,
-                        current_time.strftime("%H:%M:%S")
+                        current_time.strftime("%H:%M:%S"),
                     )
 
             # Device has recovered
@@ -601,166 +726,13 @@ class AlertHandler:
         if state and state.state != STATE_UNKNOWN:
             await async_handle_state_change({"new_state": state, "old_state": None})
 
-def _target_key(target: dict) -> str:
-    """Build a stable key for a configured target."""
-    protocol = target[CONF_PROTOCOL]
-    if protocol in (PROTOCOL_TCP, PROTOCOL_UDP, PROTOCOL_AD_DC):
-        return f"{protocol}:{target[CONF_HOST]}:{target.get(CONF_PORT, 'none')}"
-    if protocol == PROTOCOL_ICMP:
-        return f"{protocol}:{target[CONF_HOST]}"
-    if protocol == PROTOCOL_ZHA:
-        return f"{protocol}:{target[CONF_ZHA_IEEE]}"
-    if protocol == PROTOCOL_MATTER:
-        return f"{protocol}:{target[CONF_MATTER_NODE_ID]}"
-    if protocol == PROTOCOL_ESPHOME:
-        return f"{protocol}:{target[CONF_ESPHOME_DEVICE_ID]}"
-    if protocol == PROTOCOL_BLUETOOTH:
-        return f"{protocol}:{target[CONF_BLUETOOTH_ADDRESS]}"
-    return f"{protocol}:{target.get(CONF_HOST, 'unknown')}"
 
-
-class ConnectivityMonitorCoordinator(DataUpdateCoordinator):
-    """Central coordinator that polls all configured targets for one entry."""
-
-    def __init__(
-        self,
-        hass: HomeAssistant,
-        targets: list[dict],
-        update_interval: int,
-        dns_server: str,
-        entry_id: str,
-    ) -> None:
-        """Initialize the shared coordinator."""
-        super().__init__(
-            hass,
-            _LOGGER,
-            name=f"{DOMAIN}_{entry_id}",
-            update_interval=timedelta(seconds=update_interval),
-        )
-        self.targets = targets
-        self._network_probe = NetworkProbe(hass, dns_server)
-
-    def get_target_data(self, target: dict) -> dict[str, Any]:
-        """Return the last known payload for a specific target."""
-        return (self.data or {}).get(_target_key(target), {})
-
-    async def _async_update_data(self) -> dict[str, dict[str, Any]]:
-        """Fetch data for all configured targets in a single polling cycle."""
-        network_hosts = {
-            target[CONF_HOST]
-            for target in self.targets
-            if target.get(CONF_PROTOCOL) not in (
-                PROTOCOL_ZHA,
-                PROTOCOL_MATTER,
-                PROTOCOL_ESPHOME,
-                PROTOCOL_BLUETOOTH,
-            )
-        }
-        await asyncio.gather(
-            *(self._network_probe.async_prepare_host(host) for host in network_hosts)
-        )
-
-        results = await asyncio.gather(
-            *(self._async_update_target(target) for target in self.targets),
-            return_exceptions=True,
-        )
-
-        data: dict[str, dict[str, Any]] = {}
-        for target, result in zip(self.targets, results, strict=False):
-            key = _target_key(target)
-            if isinstance(result, Exception):
-                _LOGGER.error("Update failed for target %s: %s", key, result)
-                data[key] = self._default_result_for(target)
-                continue
-            data[key] = result if isinstance(result, dict) else self._default_result_for(target)
-
-        return data
-
-    def _default_result_for(self, target: dict) -> dict[str, Any]:
-        """Return a protocol-specific empty payload."""
-        if target[CONF_PROTOCOL] in (
-            PROTOCOL_ZHA,
-            PROTOCOL_MATTER,
-            PROTOCOL_ESPHOME,
-            PROTOCOL_BLUETOOTH,
-        ):
-            return {"active": False, "device_found": False}
-        return {
-            "connected": False,
-            "latency": None,
-            "resolved_ip": None,
-            "mac_address": None,
-        }
-
-    async def _async_update_target(self, target: dict) -> dict[str, Any]:
-        """Dispatch a target update to the protocol-specific probe."""
-        protocol = target[CONF_PROTOCOL]
-        if protocol in (PROTOCOL_TCP, PROTOCOL_UDP, PROTOCOL_ICMP, PROTOCOL_AD_DC):
-            return await self._network_probe.async_update_target(target)
-        if protocol == PROTOCOL_ZHA:
-            return await self._async_update_zha_target(target)
-        if protocol == PROTOCOL_MATTER:
-            return await self._async_update_matter_target(target)
-        if protocol == PROTOCOL_ESPHOME:
-            return await self._async_update_esphome_target(target)
-        if protocol == PROTOCOL_BLUETOOTH:
-            return await self._async_update_bluetooth_target(target)
-
-        _LOGGER.warning("Unsupported protocol '%s' for target %s", protocol, target)
-        return self._default_result_for(target)
-
-    async def _async_update_zha_target(self, target: dict) -> dict[str, Any]:
-        """Fetch last_seen and activity state for a ZHA device."""
-        from .zha import async_get_zha_device_last_seen
-
-        ieee = target[CONF_ZHA_IEEE]
-        timeout_minutes = target.get(CONF_INACTIVE_TIMEOUT, DEFAULT_INACTIVE_TIMEOUT)
-        last_seen = await async_get_zha_device_last_seen(self.hass, ieee)
-
-        active = False
-        minutes_ago = None
-        if last_seen is not None:
-            elapsed = datetime.now().timestamp() - last_seen
-            minutes_ago = round(elapsed / 60, 1)
-            active = elapsed < (timeout_minutes * 60)
-
-        return {
-            "active": active,
-            "last_seen": last_seen,
-            "minutes_ago": minutes_ago,
-        }
-
-    async def _async_update_matter_target(self, target: dict) -> dict[str, Any]:
-        """Fetch activity state for a Matter device."""
-        from .matter import async_get_matter_device_active
-
-        active = await async_get_matter_device_active(self.hass, target[CONF_MATTER_NODE_ID])
-        return {
-            "active": bool(active),
-            "device_found": active is not None,
-        }
-
-    async def _async_update_esphome_target(self, target: dict) -> dict[str, Any]:
-        """Fetch activity state for an ESPHome device."""
-        from .esphome import async_get_esphome_device_active
-
-        active = await async_get_esphome_device_active(self.hass, target[CONF_ESPHOME_DEVICE_ID])
-        return {
-            "active": bool(active),
-            "device_found": active is not None,
-        }
-
-    async def _async_update_bluetooth_target(self, target: dict) -> dict[str, Any]:
-        """Fetch activity details for a Bluetooth device."""
-        from .bluetooth import async_get_bluetooth_device_details
-
-        return await async_get_bluetooth_device_details(self.hass, target[CONF_BLUETOOTH_ADDRESS])
-
-
-class ConnectivityMonitorEntity(CoordinatorEntity):
+class ConnectivityMonitorEntity(CoordinatorEntity["ConnectivityMonitorCoordinator"]):  # pylint: disable=hass-enforce-class-module
     """Shared entity helpers for target-backed sensors."""
 
-    def __init__(self, coordinator: ConnectivityMonitorCoordinator, target: dict) -> None:
+    def __init__(
+        self, coordinator: ConnectivityMonitorCoordinator, target: dict
+    ) -> None:
         """Initialize the shared target-backed entity state."""
         super().__init__(coordinator)
         self.target = target
@@ -778,7 +750,9 @@ class ConnectivityMonitorEntity(CoordinatorEntity):
 class ConnectivitySensor(ConnectivityMonitorEntity, SensorEntity):
     """Connectivity sensor for individual protocols."""
 
-    def __init__(self, coordinator: ConnectivityMonitorCoordinator, target: dict) -> None:
+    def __init__(
+        self, coordinator: ConnectivityMonitorCoordinator, target: dict
+    ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator, target)
         self._attr_has_entity_name = True
@@ -786,7 +760,9 @@ class ConnectivitySensor(ConnectivityMonitorEntity, SensorEntity):
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
         device_name = target.get("device_name", target[CONF_HOST])
-        safe_device_name = device_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
+        safe_device_name = (
+            device_name.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
+        )
 
         # Set up sensor name and ID based on protocol
         if target[CONF_PROTOCOL] == PROTOCOL_ICMP:
@@ -801,7 +777,9 @@ class ConnectivitySensor(ConnectivityMonitorEntity, SensorEntity):
             entity_id_suffix = f"{target[CONF_PROTOCOL].lower()}_{target[CONF_PORT]}"
 
         # Set entity ID
-        self.entity_id = f"sensor.connectivity_monitor_{safe_device_name}_{entity_id_suffix}"
+        self.entity_id = (
+            f"sensor.connectivity_monitor_{safe_device_name}_{entity_id_suffix}"
+        )
 
         # Get data from coordinator
         coord_data = coordinator.get_target_data(target)
@@ -811,11 +789,11 @@ class ConnectivitySensor(ConnectivityMonitorEntity, SensorEntity):
         # Set unique_id with prefix
         base_id = None
         if mac_address:
-            base_id = mac_address.lower().replace(':', '')
+            base_id = mac_address.lower().replace(":", "")
         elif ip_address:
-            base_id = ip_address.replace('.', '_')
+            base_id = ip_address.replace(".", "_")
         else:
-            base_id = target[CONF_HOST].replace('.', '_')
+            base_id = target[CONF_HOST].replace(".", "_")
 
         self._attr_unique_id = f"connectivity_{base_id}_{target[CONF_PROTOCOL]}_{target.get(CONF_PORT, 'ping')}"
 
@@ -832,7 +810,11 @@ class ConnectivitySensor(ConnectivityMonitorEntity, SensorEntity):
             connections.add(("hostname", target[CONF_HOST]))
 
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, mac_address.lower().replace(':', '')) if mac_address else (DOMAIN, target[CONF_HOST])},
+            identifiers={
+                (DOMAIN, mac_address.lower().replace(":", ""))
+                if mac_address
+                else (DOMAIN, target[CONF_HOST])
+            },
             name=device_name,
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
@@ -846,7 +828,9 @@ class ConnectivitySensor(ConnectivityMonitorEntity, SensorEntity):
         """Return the state of the sensor."""
         if not self.target_data:
             return "Unknown"
-        return "Connected" if self.target_data.get("connected", False) else "Disconnected"
+        return (
+            "Connected" if self.target_data.get("connected", False) else "Disconnected"
+        )
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -858,8 +842,10 @@ class ConnectivitySensor(ConnectivityMonitorEntity, SensorEntity):
 
         if self.target[CONF_PROTOCOL] == PROTOCOL_AD_DC:
             attrs["port"] = self.target[CONF_PORT]
-            attrs["service"] = AD_DC_PORTS.get(self.target[CONF_PORT], "Unknown Service")
-        elif self.target[CONF_PROTOCOL] not in [PROTOCOL_ICMP]:
+            attrs["service"] = AD_DC_PORTS.get(
+                self.target[CONF_PORT], "Unknown Service"
+            )
+        elif self.target[CONF_PROTOCOL] != PROTOCOL_ICMP:
             attrs["port"] = self.target[CONF_PORT]
 
         if self.target_data:
@@ -879,19 +865,28 @@ class ConnectivitySensor(ConnectivityMonitorEntity, SensorEntity):
             return "mdi:lan-disconnect"
         return "mdi:lan-connect"
 
+
 class OverviewSensor(ConnectivityMonitorEntity, SensorEntity):
     """Overview sensor showing combined status."""
 
-    def __init__(self, coordinator: ConnectivityMonitorCoordinator, target: dict, device_targets: list[dict]) -> None:
+    def __init__(
+        self,
+        coordinator: ConnectivityMonitorCoordinator,
+        target: dict,
+        device_targets: list[dict],
+    ) -> None:
         """Initialize the overview sensor."""
         super().__init__(coordinator, target)
         self._device_targets = device_targets
+        self._alert_handler: AlertHandler | None = None
         self._attr_has_entity_name = True
         self._attr_available = True
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
         device_name = target.get("device_name", target[CONF_HOST])
-        safe_device_name = device_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
+        safe_device_name = (
+            device_name.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
+        )
 
         self._attr_name = "Overall Status"
         self.entity_id = f"sensor.connectivity_monitor_{safe_device_name}_overall"
@@ -903,11 +898,11 @@ class OverviewSensor(ConnectivityMonitorEntity, SensorEntity):
 
         # Set unique_id with prefix
         if mac_address:
-            base_id = mac_address.lower().replace(':', '')
+            base_id = mac_address.lower().replace(":", "")
         elif ip_address:
-            base_id = ip_address.replace('.', '_')
+            base_id = ip_address.replace(".", "_")
         else:
-            base_id = target[CONF_HOST].replace('.', '_')
+            base_id = target[CONF_HOST].replace(".", "_")
 
         self._attr_unique_id = f"connectivity_{base_id}_overall"
 
@@ -924,7 +919,11 @@ class OverviewSensor(ConnectivityMonitorEntity, SensorEntity):
             connections.add(("hostname", target[CONF_HOST]))
 
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, mac_address.lower().replace(':', '')) if mac_address else (DOMAIN, target[CONF_HOST])},
+            identifiers={
+                (DOMAIN, mac_address.lower().replace(":", ""))
+                if mac_address
+                else (DOMAIN, target[CONF_HOST])
+            },
             name=device_name,
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
@@ -937,7 +936,9 @@ class OverviewSensor(ConnectivityMonitorEntity, SensorEntity):
         """Set up alerts once the final entity_id is known."""
         await super().async_added_to_hass()
         alert_handler = getattr(self, "_alert_handler", None)
-        if alert_handler and (self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)):
+        if alert_handler and (
+            self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)
+        ):
             await alert_handler.async_setup_alerts(self.entity_id, self.target)
 
     @property
@@ -958,7 +959,7 @@ class OverviewSensor(ConnectivityMonitorEntity, SensorEntity):
 
         if all_connected:
             return "Connected"
-        elif any_connected:
+        if any_connected:
             return "Partially Connected"
         return "Disconnected"
 
@@ -968,20 +969,24 @@ class OverviewSensor(ConnectivityMonitorEntity, SensorEntity):
         attrs = {
             "host": self.target[CONF_HOST],
             "device_name": self.target.get("device_name", self.target[CONF_HOST]),
-            "monitored_services": []
+            "monitored_services": [],
         }
 
         for target in self._device_targets:
             target_data = self._target_data_for(target)
             service = {
                 "protocol": target[CONF_PROTOCOL],
-                "status": "Connected" if target_data.get("connected") else "Disconnected"
+                "status": "Connected"
+                if target_data.get("connected")
+                else "Disconnected",
             }
 
             if target[CONF_PROTOCOL] == PROTOCOL_AD_DC:
                 service["port"] = target[CONF_PORT]
-                service["service"] = AD_DC_PORTS.get(target[CONF_PORT], "Unknown Service")
-            elif target[CONF_PROTOCOL] not in [PROTOCOL_ICMP]:
+                service["service"] = AD_DC_PORTS.get(
+                    target[CONF_PORT], "Unknown Service"
+                )
+            elif target[CONF_PROTOCOL] != PROTOCOL_ICMP:
                 service["port"] = target[CONF_PORT]
 
             if target_data:
@@ -999,14 +1004,20 @@ class OverviewSensor(ConnectivityMonitorEntity, SensorEntity):
         """Return the icon to use in the frontend."""
         if self.native_value == "Connected":
             return "mdi:check-network"
-        elif self.native_value == "Partially Connected":
+        if self.native_value == "Partially Connected":
             return "mdi:network-strength-2"
         return "mdi:close-network"
+
 
 class ADOverviewSensor(ConnectivityMonitorEntity, SensorEntity):
     """Overview sensor specifically for Active Directory status."""
 
-    def __init__(self, coordinator: ConnectivityMonitorCoordinator, target: dict, ad_targets: list[dict]) -> None:
+    def __init__(
+        self,
+        coordinator: ConnectivityMonitorCoordinator,
+        target: dict,
+        ad_targets: list[dict],
+    ) -> None:
         """Initialize the AD overview sensor."""
         super().__init__(coordinator, target)
         self._targets = ad_targets
@@ -1015,7 +1026,9 @@ class ADOverviewSensor(ConnectivityMonitorEntity, SensorEntity):
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
 
         device_name = target.get("device_name", target[CONF_HOST])
-        safe_device_name = device_name.lower().replace(' ', '_').replace('-', '_').replace('.', '_')
+        safe_device_name = (
+            device_name.lower().replace(" ", "_").replace("-", "_").replace(".", "_")
+        )
 
         self._attr_name = "Active Directory"
         self.entity_id = f"sensor.connectivity_monitor_{safe_device_name}_ad"
@@ -1028,11 +1041,11 @@ class ADOverviewSensor(ConnectivityMonitorEntity, SensorEntity):
         # Set unique_id with prefix
         base_id = None
         if mac_address:
-            base_id = mac_address.lower().replace(':', '')
+            base_id = mac_address.lower().replace(":", "")
         elif ip_address:
-            base_id = ip_address.replace('.', '_')
+            base_id = ip_address.replace(".", "_")
         else:
-            base_id = target[CONF_HOST].replace('.', '_')
+            base_id = target[CONF_HOST].replace(".", "_")
 
         self._attr_unique_id = f"connectivity_{base_id}_ad"
 
@@ -1049,7 +1062,11 @@ class ADOverviewSensor(ConnectivityMonitorEntity, SensorEntity):
             connections.add(("hostname", target[CONF_HOST]))
 
         self._attr_device_info = DeviceInfo(
-            identifiers={(DOMAIN, mac_address.lower().replace(':', '')) if mac_address else (DOMAIN, target[CONF_HOST])},
+            identifiers={
+                (DOMAIN, mac_address.lower().replace(":", ""))
+                if mac_address
+                else (DOMAIN, target[CONF_HOST])
+            },
             name=device_name,
             manufacturer="Connectivity Monitor",
             model="Network Monitor",
@@ -1076,7 +1093,7 @@ class ADOverviewSensor(ConnectivityMonitorEntity, SensorEntity):
 
         if all_connected:
             return "Connected"
-        elif any_connected:
+        if any_connected:
             return "Partially Connected"
         return "Not Connected"
 
@@ -1086,7 +1103,7 @@ class ADOverviewSensor(ConnectivityMonitorEntity, SensorEntity):
         attrs = {
             "host": self.target[CONF_HOST],
             "device_name": self.target.get("device_name", self.target[CONF_HOST]),
-            "ad_services": []
+            "ad_services": [],
         }
 
         for target in self._targets:
@@ -1094,7 +1111,9 @@ class ADOverviewSensor(ConnectivityMonitorEntity, SensorEntity):
             service = {
                 "port": target[CONF_PORT],
                 "service": AD_DC_PORTS.get(target[CONF_PORT], "Unknown Service"),
-                "status": "Connected" if target_data.get("connected") else "Not Connected"
+                "status": "Connected"
+                if target_data.get("connected")
+                else "Not Connected",
             }
 
             if target_data.get("latency") is not None:
@@ -1109,7 +1128,7 @@ class ADOverviewSensor(ConnectivityMonitorEntity, SensorEntity):
         """Return the icon to use in the frontend."""
         if self.native_value == "Connected":
             return "mdi:domain"
-        elif self.native_value == "Partially Connected":
+        if self.native_value == "Partially Connected":
             return "mdi:domain-remove"
         return "mdi:domain-off"
 
@@ -1117,9 +1136,12 @@ class ADOverviewSensor(ConnectivityMonitorEntity, SensorEntity):
 class ZHASensor(ConnectivityMonitorEntity, SensorEntity):
     """Sensor for a ZHA (ZigBee) device activity status based on last_seen."""
 
-    def __init__(self, coordinator: ConnectivityMonitorCoordinator, target: dict) -> None:
+    def __init__(
+        self, coordinator: ConnectivityMonitorCoordinator, target: dict
+    ) -> None:
         """Initialize the ZHA sensor."""
         super().__init__(coordinator, target)
+        self._alert_handler: AlertHandler | None = None
         self._attr_has_entity_name = True
         self._attr_available = True
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -1168,10 +1190,14 @@ class ZHASensor(ConnectivityMonitorEntity, SensorEntity):
         }
         if self.target.get(CONF_ALERT_GROUP):
             attrs["alert_group"] = self.target[CONF_ALERT_GROUP]
-            attrs["alert_delay"] = self.target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+            attrs["alert_delay"] = self.target.get(
+                CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY
+            )
         if self.target.get(CONF_ALERT_ACTION):
             attrs["alert_action"] = self.target[CONF_ALERT_ACTION]
-            attrs["alert_action_delay"] = self.target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+            attrs["alert_action_delay"] = self.target.get(
+                CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+            )
         if self.target_data:
             raw_ts = self.target_data.get("last_seen")
             if raw_ts is not None:
@@ -1192,16 +1218,21 @@ class ZHASensor(ConnectivityMonitorEntity, SensorEntity):
         """Set up alerts after entity_id is finalised by HA registry."""
         await super().async_added_to_hass()
         alert_handler = getattr(self, "_alert_handler", None)
-        if alert_handler and (self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)):
+        if alert_handler and (
+            self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)
+        ):
             await alert_handler.async_setup_alerts(self.entity_id, self.target)
 
 
 class MatterSensor(ConnectivityMonitorEntity, SensorEntity):
     """Sensor for a Matter device activity status based on entity availability."""
 
-    def __init__(self, coordinator: ConnectivityMonitorCoordinator, target: dict) -> None:
+    def __init__(
+        self, coordinator: ConnectivityMonitorCoordinator, target: dict
+    ) -> None:
         """Initialize the Matter sensor."""
         super().__init__(coordinator, target)
+        self._alert_handler: AlertHandler | None = None
         self._attr_has_entity_name = True
         self._attr_available = True
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -1248,10 +1279,14 @@ class MatterSensor(ConnectivityMonitorEntity, SensorEntity):
         }
         if self.target.get(CONF_ALERT_GROUP):
             attrs["alert_group"] = self.target[CONF_ALERT_GROUP]
-            attrs["alert_delay"] = self.target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+            attrs["alert_delay"] = self.target.get(
+                CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY
+            )
         if self.target.get(CONF_ALERT_ACTION):
             attrs["alert_action"] = self.target[CONF_ALERT_ACTION]
-            attrs["alert_action_delay"] = self.target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+            attrs["alert_action_delay"] = self.target.get(
+                CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+            )
         return attrs
 
     @property
@@ -1265,16 +1300,21 @@ class MatterSensor(ConnectivityMonitorEntity, SensorEntity):
         """Set up alerts after entity_id is finalised by HA registry."""
         await super().async_added_to_hass()
         alert_handler = getattr(self, "_alert_handler", None)
-        if alert_handler and (self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)):
+        if alert_handler and (
+            self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)
+        ):
             await alert_handler.async_setup_alerts(self.entity_id, self.target)
 
 
 class ESPHomeSensor(ConnectivityMonitorEntity, SensorEntity):
     """Sensor for an ESPHome device activity status based on entity availability."""
 
-    def __init__(self, coordinator: ConnectivityMonitorCoordinator, target: dict) -> None:
+    def __init__(
+        self, coordinator: ConnectivityMonitorCoordinator, target: dict
+    ) -> None:
         """Initialize the ESPHome sensor."""
         super().__init__(coordinator, target)
+        self._alert_handler: AlertHandler | None = None
         self._attr_has_entity_name = True
         self._attr_available = True
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -1292,7 +1332,9 @@ class ESPHomeSensor(ConnectivityMonitorEntity, SensorEntity):
         self.entity_id = f"sensor.connectivity_monitor_esphome_{safe_name}"
 
         # Unique ID scoped to this integration
-        device_id_clean = target[CONF_ESPHOME_DEVICE_ID].replace("-", "_").replace(":", "_")
+        device_id_clean = (
+            target[CONF_ESPHOME_DEVICE_ID].replace("-", "_").replace(":", "_")
+        )
         self._attr_unique_id = f"connectivity_esphome_{device_id_clean}"
 
         # Merge onto the existing ESPHome device so the sensor appears on the
@@ -1306,13 +1348,14 @@ class ESPHomeSensor(ConnectivityMonitorEntity, SensorEntity):
         #   3. entry_id fallback — last resort; may create a new unnamed device
         #      if neither of the above is present (only for old config entries).
         mac_address = target.get("esphome_mac")
-        esphome_identifier = target.get("esphome_identifier") or target[CONF_ESPHOME_DEVICE_ID]
+        esphome_identifier = (
+            target.get("esphome_identifier") or target[CONF_ESPHOME_DEVICE_ID]
+        )
 
         device_info_kwargs: dict = {
             "identifiers": {("esphome", esphome_identifier)},
         }
         if mac_address:
-            from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC
             device_info_kwargs["connections"] = {(CONNECTION_NETWORK_MAC, mac_address)}
 
         self._attr_device_info = DeviceInfo(**device_info_kwargs)
@@ -1337,10 +1380,14 @@ class ESPHomeSensor(ConnectivityMonitorEntity, SensorEntity):
         }
         if self.target.get(CONF_ALERT_GROUP):
             attrs["alert_group"] = self.target[CONF_ALERT_GROUP]
-            attrs["alert_delay"] = self.target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+            attrs["alert_delay"] = self.target.get(
+                CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY
+            )
         if self.target.get(CONF_ALERT_ACTION):
             attrs["alert_action"] = self.target[CONF_ALERT_ACTION]
-            attrs["alert_action_delay"] = self.target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+            attrs["alert_action_delay"] = self.target.get(
+                CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+            )
         return attrs
 
     @property
@@ -1354,16 +1401,21 @@ class ESPHomeSensor(ConnectivityMonitorEntity, SensorEntity):
         """Set up alerts after entity_id is finalised by HA registry."""
         await super().async_added_to_hass()
         alert_handler = getattr(self, "_alert_handler", None)
-        if alert_handler and (self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)):
+        if alert_handler and (
+            self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)
+        ):
             await alert_handler.async_setup_alerts(self.entity_id, self.target)
 
 
 class BluetoothSensor(ConnectivityMonitorEntity, SensorEntity):
     """Sensor for a Bluetooth device activity status based on entity availability."""
 
-    def __init__(self, coordinator: ConnectivityMonitorCoordinator, target: dict) -> None:
+    def __init__(
+        self, coordinator: ConnectivityMonitorCoordinator, target: dict
+    ) -> None:
         """Initialize the Bluetooth sensor."""
         super().__init__(coordinator, target)
+        self._alert_handler: AlertHandler | None = None
         self._attr_has_entity_name = True
         self._attr_available = True
         self._attr_entity_category = EntityCategory.DIAGNOSTIC
@@ -1380,7 +1432,9 @@ class BluetoothSensor(ConnectivityMonitorEntity, SensorEntity):
         self._attr_name = "Bluetooth Status"
         self.entity_id = f"sensor.connectivity_monitor_bluetooth_{safe_name}"
 
-        bt_address_clean = target[CONF_BLUETOOTH_ADDRESS].replace("-", "_").replace(":", "_")
+        bt_address_clean = (
+            target[CONF_BLUETOOTH_ADDRESS].replace("-", "_").replace(":", "_")
+        )
         self._attr_unique_id = f"connectivity_bluetooth_{bt_address_clean}"
 
         self._attr_device_info = DeviceInfo(
@@ -1424,10 +1478,14 @@ class BluetoothSensor(ConnectivityMonitorEntity, SensorEntity):
                 attrs["tx_power"] = self.target_data["tx_power"]
         if self.target.get(CONF_ALERT_GROUP):
             attrs["alert_group"] = self.target[CONF_ALERT_GROUP]
-            attrs["alert_delay"] = self.target.get(CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY)
+            attrs["alert_delay"] = self.target.get(
+                CONF_ALERT_DELAY, DEFAULT_ALERT_DELAY
+            )
         if self.target.get(CONF_ALERT_ACTION):
             attrs["alert_action"] = self.target[CONF_ALERT_ACTION]
-            attrs["alert_action_delay"] = self.target.get(CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY)
+            attrs["alert_action_delay"] = self.target.get(
+                CONF_ALERT_ACTION_DELAY, DEFAULT_ALERT_ACTION_DELAY
+            )
         return attrs
 
     @property
@@ -1441,6 +1499,7 @@ class BluetoothSensor(ConnectivityMonitorEntity, SensorEntity):
         """Set up alerts after entity_id is finalised by HA registry."""
         await super().async_added_to_hass()
         alert_handler = getattr(self, "_alert_handler", None)
-        if alert_handler and (self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)):
+        if alert_handler and (
+            self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)
+        ):
             await alert_handler.async_setup_alerts(self.entity_id, self.target)
-

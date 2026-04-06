@@ -1,3 +1,5 @@
+"""Network probe helpers for Connectivity Monitor."""
+
 from __future__ import annotations
 
 import asyncio
@@ -14,16 +16,16 @@ from .const import (
     CONF_PROTOCOL,
     DEFAULT_PING_TIMEOUT,
     PROTOCOL_AD_DC,
-    PROTOCOL_ICMP,
     PROTOCOL_TCP,
     PROTOCOL_UDP,
 )
 
 try:
     import dns.resolver as dns_resolver
+
     HAVE_DNS = True
 except ImportError:
-    dns_resolver = None
+    dns_resolver = None  # type: ignore[assignment]
     HAVE_DNS = False
 
 _LOGGER = logging.getLogger(__name__)
@@ -55,7 +57,7 @@ class NetworkProbe:
         """Probe a TCP/UDP/ICMP network target."""
         host = target[CONF_HOST]
         protocol = target[CONF_PROTOCOL]
-        result = {
+        result: dict[str, Any] = {
             "connected": False,
             "latency": None,
             "resolved_ip": None,
@@ -83,8 +85,7 @@ class NetworkProbe:
                 result["connected"] = True
                 result["latency"] = round(latency, 2)
 
-            return result
-        except Exception as err:
+        except (OSError, TimeoutError) as err:
             _LOGGER.error(
                 "Update failed for %s:%s (%s): %s",
                 host,
@@ -92,6 +93,8 @@ class NetworkProbe:
                 protocol,
                 err,
             )
+            return result
+        else:
             return result
 
     async def _async_test_tcp(self, resolved_ip: str, port: int) -> float | None:
@@ -105,10 +108,11 @@ class NetworkProbe:
             latency = (self.hass.loop.time() - start_time) * 1000
             writer.close()
             await writer.wait_closed()
-            return latency
-        except Exception as err:
+        except (OSError, TimeoutError) as err:
             _LOGGER.debug("TCP connection failed for %s:%s: %s", resolved_ip, port, err)
             return None
+        else:
+            return latency
 
     async def _async_test_udp(self, resolved_ip: str, port: int) -> float | None:
         """Open a UDP socket and return latency in milliseconds."""
@@ -118,7 +122,7 @@ class NetworkProbe:
             sock.settimeout(5)
             await self.hass.async_add_executor_job(sock.connect, (resolved_ip, port))
             return (self.hass.loop.time() - start_time) * 1000
-        except Exception as err:
+        except (OSError, TimeoutError) as err:
             _LOGGER.debug("UDP connection failed for %s:%s: %s", resolved_ip, port, err)
             return None
         finally:
@@ -127,7 +131,11 @@ class NetworkProbe:
     async def _async_icmp_ping(self, host: str, ip_address: str) -> float | None:
         """Ping a host using Home Assistant's built-in ICMP approach."""
         try:
-            from icmplib import NameLookupError, SocketPermissionError, async_ping
+            from icmplib import (  # noqa: PLC0415
+                NameLookupError,
+                SocketPermissionError,
+                async_ping,
+            )
         except ImportError as err:
             if not self._icmp_import_failed:
                 _LOGGER.error(
@@ -160,7 +168,7 @@ class NetworkProbe:
         except NameLookupError:
             _LOGGER.debug("ICMP lookup failed for %s", ip_address)
             return None
-        except Exception as err:
+        except (OSError, RuntimeError) as err:
             _LOGGER.debug("ICMP ping failed for %s: %s", ip_address, err)
             return None
 
@@ -187,9 +195,10 @@ class NetworkProbe:
                 return mac_match.group(0).upper().replace("-", ":")
 
             _LOGGER.debug("No MAC address found in ARP for IP %s", ip)
-            return None
-        except Exception as err:
+        except (OSError, ValueError) as err:
             _LOGGER.error("Error getting MAC address for %s: %s", ip, err)
+            return None
+        else:
             return None
 
     async def _get_resolver(self):
@@ -200,6 +209,7 @@ class NetworkProbe:
         resolver_module = dns_resolver
 
         if self._resolver is None:
+
             def _create_resolver():
                 resolver = resolver_module.Resolver()
                 resolver.nameservers = [self._dns_server]
@@ -216,15 +226,17 @@ class NetworkProbe:
         try:
             try:
                 socket.inet_pton(socket.AF_INET, hostname)
-                return hostname
-            except (socket.error, ValueError):
+            except OSError, ValueError:
                 pass
+            else:
+                return hostname
 
             try:
                 socket.inet_pton(socket.AF_INET6, hostname)
-                return hostname
-            except (socket.error, ValueError):
+            except OSError, ValueError:
                 pass
+            else:
+                return hostname
 
             resolver = await self._get_resolver()
             if resolver is None:
@@ -236,9 +248,10 @@ class NetworkProbe:
                     answers = resolver.resolve(hostname, "A")
                     if answers:
                         return str(answers[0])
-                    return None
-                except Exception as err:
+                except Exception as err:  # noqa: BLE001
                     _LOGGER.debug("DNS resolution failed: %s", err)
+                    return None
+                else:
                     return None
 
             result = await self.hass.async_add_executor_job(_do_resolve)
@@ -257,7 +270,7 @@ class NetworkProbe:
                 hostname,
                 self._dns_server,
             )
-            return None
-        except Exception as err:
+        except (OSError, RuntimeError) as err:
             _LOGGER.error("Error resolving hostname %s: %s", hostname, err)
             return None
+        return None

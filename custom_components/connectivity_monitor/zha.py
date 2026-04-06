@@ -1,14 +1,18 @@
 """ZHA (Zigbee Home Automation) device access helpers for Connectivity Monitor."""
+
 from __future__ import annotations
 
 import logging
+
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 
 _LOGGER = logging.getLogger(__name__)
 
 ZHA_DOMAIN = "zha"
 
 
-def _get_zha_gateway(hass):
+def _get_zha_gateway(hass: HomeAssistant):
     """Return the ZHA gateway object from hass.data, or None.
 
     Tries multiple paths to handle all known HA versions:
@@ -71,12 +75,12 @@ def _last_seen_to_timestamp(last_seen) -> float | None:
     if hasattr(last_seen, "timestamp"):
         try:
             return last_seen.timestamp()
-        except Exception:
+        except AttributeError, TypeError:
             pass
     return None
 
 
-def _build_registry_name_map(hass) -> dict[str, str]:
+def _build_registry_name_map(hass: HomeAssistant) -> dict[str, str]:
     """Build a ieee -> display_name map from the HA device registry.
 
     Uses name_by_user (user-assigned rename) when available, otherwise the
@@ -84,25 +88,21 @@ def _build_registry_name_map(hass) -> dict[str, str]:
     """
     name_map: dict[str, str] = {}
     try:
-        from homeassistant.helpers.device_registry import async_get as async_get_dr
-
-        device_registry = async_get_dr(hass)
+        device_registry = dr.async_get(hass)
         for device_entry in device_registry.devices.values():
             for identifier in device_entry.identifiers:
                 if identifier[0] == ZHA_DOMAIN:
                     ieee = identifier[1]
                     name_map[ieee] = (
-                        device_entry.name_by_user
-                        or device_entry.name
-                        or ieee
+                        device_entry.name_by_user or device_entry.name or ieee
                     )
                     break
-    except Exception as err:
+    except (AttributeError, RuntimeError) as err:
         _LOGGER.debug("Could not build registry name map: %s", err)
     return name_map
 
 
-async def async_get_zha_devices(hass) -> list[dict]:
+async def async_get_zha_devices(hass: HomeAssistant) -> list[dict]:
     """Return a list of all non-coordinator ZHA devices.
 
     Tries the ZHA gateway first (gives us last_seen).
@@ -145,15 +145,13 @@ async def async_get_zha_devices(hass) -> list[dict]:
             if devices:
                 _LOGGER.debug("ZHA devices from gateway: %d found", len(devices))
                 return devices
-    except Exception as err:
+    except (AttributeError, RuntimeError) as err:
         _LOGGER.warning("ZHA gateway enumeration failed: %s", err)
 
     # ── Fallback path: HA device registry ────────────────────────────────────
     _LOGGER.debug("Falling back to device registry for ZHA device list")
     try:
-        from homeassistant.helpers.device_registry import async_get as async_get_dr
-
-        device_registry = async_get_dr(hass)
+        device_registry = dr.async_get(hass)
         for device_entry in device_registry.devices.values():
             for identifier in device_entry.identifiers:
                 if identifier[0] == ZHA_DOMAIN:
@@ -165,9 +163,7 @@ async def async_get_zha_devices(hass) -> list[dict]:
                         {
                             "ieee": ieee,
                             "name": (
-                                device_entry.name_by_user
-                                or device_entry.name
-                                or ieee
+                                device_entry.name_by_user or device_entry.name or ieee
                             ),
                             "model": device_entry.model,
                             "manufacturer": device_entry.manufacturer,
@@ -175,14 +171,16 @@ async def async_get_zha_devices(hass) -> list[dict]:
                         }
                     )
                     break
-    except Exception as err:
+    except (AttributeError, RuntimeError) as err:
         _LOGGER.warning("Device registry ZHA fallback failed: %s", err)
 
     _LOGGER.debug("ZHA devices from device registry fallback: %d found", len(devices))
     return devices
 
 
-async def async_get_zha_device_last_seen(hass, ieee: str) -> float | None:
+async def async_get_zha_device_last_seen(
+    hass: HomeAssistant, ieee: str
+) -> float | None:
     """Return the last_seen Unix timestamp for a ZHA device by IEEE address.
 
     Tries the ZHA gateway first; falls back to the device registry.
@@ -193,24 +191,24 @@ async def async_get_zha_device_last_seen(hass, ieee: str) -> float | None:
         if gateway is not None:
             for dev_ieee, device in gateway.devices.items():
                 if str(dev_ieee) == ieee:
-                    return _last_seen_to_timestamp(
-                        getattr(device, "last_seen", None)
-                    )
-    except Exception as err:
-        _LOGGER.warning("Failed to get last_seen from ZHA gateway for %s: %s", ieee, err)
+                    return _last_seen_to_timestamp(getattr(device, "last_seen", None))
+    except (AttributeError, RuntimeError) as err:
+        _LOGGER.warning(
+            "Failed to get last_seen from ZHA gateway for %s: %s", ieee, err
+        )
 
     # ── Fallback: device registry last_seen (HA 2024.4+) ─────────────────────
     try:
-        from homeassistant.helpers.device_registry import async_get as async_get_dr
-
-        device_registry = async_get_dr(hass)
+        device_registry = dr.async_get(hass)
         for device_entry in device_registry.devices.values():
             for identifier in device_entry.identifiers:
                 if identifier[0] == ZHA_DOMAIN and identifier[1] == ieee:
                     return _last_seen_to_timestamp(
                         getattr(device_entry, "last_seen", None)
                     )
-    except Exception as err:
-        _LOGGER.warning("Failed to get last_seen from device registry for %s: %s", ieee, err)
+    except (AttributeError, RuntimeError) as err:
+        _LOGGER.warning(
+            "Failed to get last_seen from device registry for %s: %s", ieee, err
+        )
 
     return None

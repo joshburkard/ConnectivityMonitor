@@ -1,14 +1,19 @@
 """ESPHome device access helpers for Connectivity Monitor."""
+
 from __future__ import annotations
 
 import logging
+
+from homeassistant.config_entries import ConfigEntryState
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 _LOGGER = logging.getLogger(__name__)
 
 ESPHOME_DOMAIN = "esphome"
 
 
-async def async_get_esphome_devices(hass) -> list[dict]:
+async def async_get_esphome_devices(hass: HomeAssistant) -> list[dict]:
     """Return a list of all ESPHome devices discovered in Home Assistant.
 
     Primary path: iterate loaded ESPHome config entries (one per node) and
@@ -21,14 +26,12 @@ async def async_get_esphome_devices(hass) -> list[dict]:
     The stable key stored as device_id is the config-entry entry_id so it
     survives device renames.
     """
+    # pylint: disable=too-many-nested-blocks
     devices: list[dict] = []
     seen_device_registry_ids: set[str] = set()
 
     try:
-        from homeassistant.helpers.device_registry import async_get as async_get_dr
-        from homeassistant.config_entries import ConfigEntryState
-
-        device_registry = async_get_dr(hass)
+        device_registry = dr.async_get(hass)
 
         # ── Primary path: one config entry per ESPHome node ───────────────────
         for entry in hass.config_entries.async_entries(ESPHOME_DOMAIN):
@@ -63,10 +66,17 @@ async def async_get_esphome_devices(hass) -> list[dict]:
 
             # Extract the real ESPHome identifier (e.g. MAC-based) so the sensor
             # can attach to the existing device rather than create a new one.
-            esphome_identifier = next(
-                (str(idf[1]) for idf in device_entry.identifiers if idf[0] == ESPHOME_DOMAIN),
-                None,
-            ) or entry.unique_id  # entry.unique_id is the MAC for ESPHome config entries
+            esphome_identifier = (
+                next(
+                    (
+                        str(idf[1])
+                        for idf in device_entry.identifiers
+                        if idf[0] == ESPHOME_DOMAIN
+                    ),
+                    None,
+                )
+                or entry.unique_id
+            )  # entry.unique_id is the MAC for ESPHome config entries
 
             # Also grab the MAC from connections — used as a reliable fallback
             # in DeviceInfo so HA can always match the existing ESPHome device.
@@ -109,7 +119,11 @@ async def async_get_esphome_devices(hass) -> list[dict]:
                         seen_device_registry_ids.add(device_entry.id)
                         device_id = str(identifier[1])
                         mac_address = next(
-                            (str(con[1]) for con in device_entry.connections if con[0] == "mac"),
+                            (
+                                str(con[1])
+                                for con in device_entry.connections
+                                if con[0] == "mac"
+                            ),
                             None,
                         )
                         devices.append(
@@ -130,16 +144,16 @@ async def async_get_esphome_devices(hass) -> list[dict]:
                         )
                         break
 
-    except Exception as err:
-        _LOGGER.warning(
-            "Could not enumerate ESPHome devices: %s", err
-        )
+    except (AttributeError, RuntimeError) as err:
+        _LOGGER.warning("Could not enumerate ESPHome devices: %s", err)
 
     _LOGGER.debug("ESPHome devices found: %d", len(devices))
     return devices
 
 
-async def async_get_esphome_device_active(hass, device_id: str) -> bool | None:
+async def async_get_esphome_device_active(
+    hass: HomeAssistant, device_id: str
+) -> bool | None:
     """Return True if the ESPHome device has at least one available entity.
 
     A device is considered Active when one or more of its entities report a
@@ -150,12 +164,8 @@ async def async_get_esphome_device_active(hass, device_id: str) -> bool | None:
     value (fallback).
     """
     try:
-        from homeassistant.helpers.device_registry import async_get as async_get_dr
-        from homeassistant.helpers.entity_registry import async_get as async_get_er
-        from homeassistant.config_entries import ConfigEntryState
-
-        device_registry = async_get_dr(hass)
-        entity_registry = async_get_er(hass)
+        device_registry = dr.async_get(hass)
+        entity_registry = er.async_get(hass)
 
         # ── Primary: look up by config-entry entry_id ─────────────────────────
         device_entry = None
@@ -175,16 +185,17 @@ async def async_get_esphome_device_active(hass, device_id: str) -> bool | None:
         if device_entry is None:
             for de in device_registry.devices.values():
                 for identifier in de.identifiers:
-                    if identifier[0] == ESPHOME_DOMAIN and str(identifier[1]) == device_id:
+                    if (
+                        identifier[0] == ESPHOME_DOMAIN
+                        and str(identifier[1]) == device_id
+                    ):
                         device_entry = de
                         break
                 if device_entry is not None:
                     break
 
         if device_entry is None:
-            _LOGGER.debug(
-                "ESPHome device not found for device_id '%s'", device_id
-            )
+            _LOGGER.debug("ESPHome device not found for device_id '%s'", device_id)
             return None
 
         # Gather all non-disabled entities belonging to the ESPHome integration.
@@ -210,13 +221,12 @@ async def async_get_esphome_device_active(hass, device_id: str) -> bool | None:
             if state is not None and state.state != "unavailable":
                 return True
 
-        return False
-
-    except Exception as err:
+    except (AttributeError, RuntimeError) as err:
         _LOGGER.warning(
             "Failed to determine active state for ESPHome device '%s': %s",
             device_id,
             err,
         )
         return None
-
+    else:
+        return False

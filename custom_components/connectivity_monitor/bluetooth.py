@@ -1,7 +1,12 @@
 """Bluetooth device access helpers for Connectivity Monitor."""
+
 from __future__ import annotations
 
 import logging
+
+from homeassistant.components import bluetooth
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,7 +33,7 @@ def _merge_device(base: dict, update: dict) -> dict:
     return merged
 
 
-async def async_get_bluetooth_devices(hass) -> list[dict]:
+async def async_get_bluetooth_devices(hass: HomeAssistant) -> list[dict]:
     """Return Bluetooth devices from discovery cache, merged with registry data.
 
     Many BLE devices are visible to Home Assistant only as scanner discoveries and
@@ -39,9 +44,6 @@ async def async_get_bluetooth_devices(hass) -> list[dict]:
     devices_by_address: dict[str, dict] = {}
 
     try:
-        from homeassistant.components import bluetooth
-        from homeassistant.helpers.device_registry import async_get as async_get_dr
-
         for connectable in (False, True):
             for service_info in bluetooth.async_discovered_service_info(
                 hass, connectable=connectable
@@ -58,13 +60,19 @@ async def async_get_bluetooth_devices(hass) -> list[dict]:
                         "rssi": getattr(service_info, "rssi", None),
                         "source": getattr(service_info, "source", None),
                         "connectable": getattr(service_info, "connectable", None),
-                        "service_uuids": list(getattr(service_info, "service_uuids", []) or []),
-                        "manufacturer_data": dict(getattr(service_info, "manufacturer_data", {}) or {}),
-                        "service_data": dict(getattr(service_info, "service_data", {}) or {}),
+                        "service_uuids": list(
+                            getattr(service_info, "service_uuids", []) or []
+                        ),
+                        "manufacturer_data": dict(
+                            getattr(service_info, "manufacturer_data", {}) or {}
+                        ),
+                        "service_data": dict(
+                            getattr(service_info, "service_data", {}) or {}
+                        ),
                     },
                 )
 
-        device_registry = async_get_dr(hass)
+        device_registry = dr.async_get(hass)
         for device_entry in device_registry.devices.values():
             for identifier in device_entry.identifiers:
                 if identifier[0] == BLUETOOTH_DOMAIN:
@@ -81,13 +89,11 @@ async def async_get_bluetooth_devices(hass) -> list[dict]:
                             "model": device_entry.model,
                             "manufacturer": device_entry.manufacturer,
                             "device_id": device_entry.id,
-                        }
+                        },
                     )
                     break
-    except Exception as err:
-        _LOGGER.warning(
-            "Could not enumerate Bluetooth devices: %s", err
-        )
+    except (AttributeError, RuntimeError) as err:
+        _LOGGER.warning("Could not enumerate Bluetooth devices: %s", err)
 
     devices = sorted(
         devices_by_address.values(),
@@ -97,15 +103,15 @@ async def async_get_bluetooth_devices(hass) -> list[dict]:
     return devices
 
 
-async def async_get_bluetooth_device_active(hass, bt_address: str) -> bool | None:
+async def async_get_bluetooth_device_active(
+    hass: HomeAssistant, bt_address: str
+) -> bool | None:
     """Return True when the Bluetooth address is currently present.
 
     This works for both registry-backed Bluetooth devices and scanner-only BLE
     devices that only exist in Home Assistant's Bluetooth discovery cache.
     """
     try:
-        from homeassistant.components import bluetooth
-
         normalized = _normalize_address(bt_address)
         service_info = bluetooth.async_last_service_info(
             hass, normalized, connectable=False
@@ -119,19 +125,20 @@ async def async_get_bluetooth_device_active(hass, bt_address: str) -> bool | Non
 
         return bluetooth.async_address_present(hass, normalized, connectable=False)
 
-    except Exception as err:
+    except (AttributeError, RuntimeError) as err:
         _LOGGER.warning(
             "Error checking Bluetooth device active status for '%s': %s",
-            bt_address, err,
+            bt_address,
+            err,
         )
         return None
 
 
-async def async_get_bluetooth_device_details(hass, bt_address: str) -> dict:
+async def async_get_bluetooth_device_details(
+    hass: HomeAssistant, bt_address: str
+) -> dict:
     """Return latest Bluetooth advertisement details for an address."""
     try:
-        from homeassistant.components import bluetooth
-
         normalized = _normalize_address(bt_address)
         service_info = bluetooth.async_last_service_info(
             hass, normalized, connectable=False
@@ -156,12 +163,14 @@ async def async_get_bluetooth_device_details(hass, bt_address: str) -> dict:
             "source": getattr(service_info, "source", None),
             "connectable": getattr(service_info, "connectable", None),
             "service_uuids": list(getattr(service_info, "service_uuids", []) or []),
-            "manufacturer_data": dict(getattr(service_info, "manufacturer_data", {}) or {}),
+            "manufacturer_data": dict(
+                getattr(service_info, "manufacturer_data", {}) or {}
+            ),
             "service_data": dict(getattr(service_info, "service_data", {}) or {}),
             "time": getattr(service_info, "time", None),
             "tx_power": getattr(service_info, "tx_power", None),
         }
-    except Exception as err:
+    except (AttributeError, RuntimeError) as err:
         _LOGGER.warning(
             "Error getting Bluetooth device details for '%s': %s",
             bt_address,

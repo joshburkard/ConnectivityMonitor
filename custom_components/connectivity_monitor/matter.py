@@ -1,14 +1,18 @@
 """Matter device access helpers for Connectivity Monitor."""
+
 from __future__ import annotations
 
 import logging
+
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 
 _LOGGER = logging.getLogger(__name__)
 
 MATTER_DOMAIN = "matter"
 
 
-async def async_get_matter_devices(hass) -> list[dict]:
+async def async_get_matter_devices(hass: HomeAssistant) -> list[dict]:
     """Return a list of all Matter devices from the HA device registry.
 
     Matter devices are identified by the 'matter' domain in the device registry.
@@ -17,9 +21,7 @@ async def async_get_matter_devices(hass) -> list[dict]:
     """
     devices: list[dict] = []
     try:
-        from homeassistant.helpers.device_registry import async_get as async_get_dr
-
-        device_registry = async_get_dr(hass)
+        device_registry = dr.async_get(hass)
         for device_entry in device_registry.devices.values():
             for identifier in device_entry.identifiers:
                 if identifier[0] == MATTER_DOMAIN:
@@ -38,14 +40,18 @@ async def async_get_matter_devices(hass) -> list[dict]:
                         }
                     )
                     break
-    except Exception as err:
-        _LOGGER.warning("Could not enumerate Matter devices from device registry: %s", err)
+    except (AttributeError, RuntimeError) as err:
+        _LOGGER.warning(
+            "Could not enumerate Matter devices from device registry: %s", err
+        )
 
     _LOGGER.debug("Matter devices found: %d", len(devices))
     return devices
 
 
-async def async_get_matter_device_active(hass, node_id: str) -> bool | None:
+async def async_get_matter_device_active(
+    hass: HomeAssistant, node_id: str
+) -> bool | None:
     """Return True if the Matter device has at least one available entity.
 
     A Matter device is considered Active when one or more of its entities
@@ -53,11 +59,8 @@ async def async_get_matter_device_active(hass, node_id: str) -> bool | None:
     cannot be found at all.
     """
     try:
-        from homeassistant.helpers.device_registry import async_get as async_get_dr
-        from homeassistant.helpers.entity_registry import async_get as async_get_er
-
-        device_registry = async_get_dr(hass)
-        entity_registry = async_get_er(hass)
+        device_registry = dr.async_get(hass)
+        entity_registry = er.async_get(hass)
 
         # Locate the device entry for this node_id
         device_entry = None
@@ -87,9 +90,7 @@ async def async_get_matter_device_active(hass, node_id: str) -> bool | None:
         ]
 
         if not entities:
-            _LOGGER.debug(
-                "No enabled entities found for Matter device '%s'", node_id
-            )
+            _LOGGER.debug("No enabled entities found for Matter device '%s'", node_id)
             return None
 
         # Device is active when any entity is in a non-unavailable state
@@ -98,12 +99,12 @@ async def async_get_matter_device_active(hass, node_id: str) -> bool | None:
             if state is not None and state.state != "unavailable":
                 return True
 
-        return False
-
-    except Exception as err:
+    except (AttributeError, RuntimeError) as err:
         _LOGGER.warning(
             "Failed to determine active state for Matter device '%s': %s",
             node_id,
             err,
         )
         return None
+    else:
+        return False
