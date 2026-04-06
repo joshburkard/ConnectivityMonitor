@@ -41,7 +41,7 @@ Recommended to be installed via [HACS](https://github.com/hacs/integration)
 
 1. Go to HACS -> Integrations
 2. Add this repo to your HACS custom repositories:
-    - [https://github.com/joshburkard/ConnectivityMonitor](https://github.com/joshburkard/ConnectivityMonitor)
+    - [https://github.com/joshburkard/home-assistant-connectivity-monitor](https://github.com/joshburkard/home-assistant-connectivity-monitor)
 3. Search for "Connectivity Monitor" and install.
 4. Restart Home Assistant
 5. Open Home Assistant Settings -> Devices & Serivces
