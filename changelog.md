@@ -2,6 +2,8 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00054 | 06/04/2026 | cleanup |
+| 0.1.00053 | 06/04/2026 | optimization for creating a real HA Integration (later target) and for HACS integration |
 | 0.1.00052 | 02/04/2026 | adjusted and standardized config flow |
 | 0.1.00051 | 02/04/2026 | separate network.py from sensor.py |
 | 0.1.00050 | 02/04/2026 | use DataUpdateCoordinator instead of custom schedulers |

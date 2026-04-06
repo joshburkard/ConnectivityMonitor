@@ -1,4 +1,4 @@
-all-files
-merge-files.ps1
-test\
+*.ps1
+test
 custom_components/connectivity_monitor/__pycache__
+test/test-api-request.ps1
