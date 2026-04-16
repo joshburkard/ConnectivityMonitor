@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00055 | 16/04/2026 | fixed wrong named LoveLace file |
 | 0.1.00054 | 06/04/2026 | cleanup |
 | 0.1.00053 | 06/04/2026 | optimization for creating a real HA Integration (later target) and for HACS integration |
 | 0.1.00052 | 02/04/2026 | adjusted and standardized config flow |
