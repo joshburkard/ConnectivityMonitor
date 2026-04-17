@@ -79,10 +79,11 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
       "label { font-size:14px; font-weight:500; color:var(--primary-text-color); display:block; margin-bottom:4px; }" +
       "select, input[type=text] { width:100%; padding:8px 12px; border:1px solid var(--divider-color,#e0e0e0); border-radius:4px; background:var(--card-background-color,#fff); color:var(--primary-text-color); font-size:14px; }" +
       "select:focus, input[type=text]:focus { outline:none; border-color:var(--primary-color); }" +
+      "ha-icon-picker { display:block; width:100%; }" +
       "</style>" +
       "<div class='form'>" +
       "<div><label>Icon</label>" +
-      "<input type='text' id='cm_icon' value='" + cmEsc(icon) + "' placeholder='mdi:lan'></div>" +
+      "<ha-icon-picker id='cm_icon' value='" + cmEsc(icon) + "' placeholder='mdi:lan'></ha-icon-picker></div>" +
       "<div><label>Title</label>" +
       "<input type='text' id='cm_title' value='" + cmEsc(title) + "' placeholder='Connectivity Monitor - " + cmEsc(dt) + "'></div>" +
       "<div><label>Device Type</label>" +
@@ -92,6 +93,11 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
       "</div>";
 
     var self = this;
+    this.shadowRoot.getElementById("cm_icon").addEventListener("value-changed", function(e) {
+      var v = e.detail && e.detail.value != null ? e.detail.value : e.target.value;
+      self._config = Object.assign({}, self._config, { icon: v });
+      self._fire();
+    });
     this.shadowRoot.getElementById("cm_icon").addEventListener("input", function(e) {
       self._config = Object.assign({}, self._config, { icon: e.target.value });
       self._fire();
