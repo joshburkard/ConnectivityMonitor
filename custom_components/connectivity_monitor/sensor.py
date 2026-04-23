@@ -7,7 +7,7 @@ from ipaddress import ip_address as _parse_ip_address
 import logging
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.const import STATE_UNKNOWN, EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr, entity_registry as er
@@ -312,6 +312,134 @@ async def async_setup_entry(  # noqa: C901
                 device_registry.async_update_device(
                     device_entry.id, remove_config_entry_id=entry.entry_id
                 )
+
+    # ------------------------------------------------------------------
+    # Build summary / count sensors (one per type × status, no device)
+    # ------------------------------------------------------------------
+    count_entities: list[SensorEntity] = []
+
+    # Network — device-level (Connected / Partially Connected / Disconnected)
+    if host_targets:
+        for status_to_count, label_part, count_key_part in (
+            ("connected", "Connected", "connected"),
+            ("partially_connected", "Partially Connected", "partially_connected"),
+            ("disconnected", "Disconnected", "disconnected"),
+        ):
+            s = ConnectivityCountSensor(
+                coordinator=coordinator,
+                entry_id=entry.entry_id,
+                count_key=f"network_{count_key_part}_devices",
+                sensor_name=f"Network {label_part} Devices",
+                targets=network_targets,
+                host_groups=host_targets,
+                status_to_count=status_to_count,
+                count_mode=_COUNT_MODE_NETWORK_DEVICE,
+            )
+            count_entities.append(s)
+            if s.unique_id:
+                new_unique_ids.add(s.unique_id)
+
+    # Network — port-level (Connected / Disconnected ports)
+    if network_targets:
+        for status_to_count, label_part, count_key_part in (
+            ("connected", "Connected", "connected"),
+            ("disconnected", "Disconnected", "disconnected"),
+        ):
+            s = ConnectivityCountSensor(
+                coordinator=coordinator,
+                entry_id=entry.entry_id,
+                count_key=f"network_{count_key_part}_ports",
+                sensor_name=f"Network {label_part} Ports",
+                targets=network_targets,
+                host_groups=None,
+                status_to_count=status_to_count,
+                count_mode=_COUNT_MODE_NETWORK_PORT,
+            )
+            count_entities.append(s)
+            if s.unique_id:
+                new_unique_ids.add(s.unique_id)
+
+    # ZigBee
+    if zha_targets:
+        for status_to_count, label_part, count_key_part in (
+            ("active", "Active", "active"),
+            ("inactive", "Inactive", "inactive"),
+        ):
+            s = ConnectivityCountSensor(
+                coordinator=coordinator,
+                entry_id=entry.entry_id,
+                count_key=f"zigbee_{count_key_part}_devices",
+                sensor_name=f"ZigBee {label_part} Devices",
+                targets=zha_targets,
+                host_groups=None,
+                status_to_count=status_to_count,
+                count_mode=_COUNT_MODE_ACTIVE_INACTIVE,
+            )
+            count_entities.append(s)
+            if s.unique_id:
+                new_unique_ids.add(s.unique_id)
+
+    # Matter
+    if matter_targets:
+        for status_to_count, label_part, count_key_part in (
+            ("active", "Active", "active"),
+            ("inactive", "Inactive", "inactive"),
+        ):
+            s = ConnectivityCountSensor(
+                coordinator=coordinator,
+                entry_id=entry.entry_id,
+                count_key=f"matter_{count_key_part}_devices",
+                sensor_name=f"Matter {label_part} Devices",
+                targets=matter_targets,
+                host_groups=None,
+                status_to_count=status_to_count,
+                count_mode=_COUNT_MODE_ACTIVE_INACTIVE,
+            )
+            count_entities.append(s)
+            if s.unique_id:
+                new_unique_ids.add(s.unique_id)
+
+    # ESPHome
+    if esphome_targets:
+        for status_to_count, label_part, count_key_part in (
+            ("active", "Active", "active"),
+            ("inactive", "Inactive", "inactive"),
+        ):
+            s = ConnectivityCountSensor(
+                coordinator=coordinator,
+                entry_id=entry.entry_id,
+                count_key=f"esphome_{count_key_part}_devices",
+                sensor_name=f"ESPHome {label_part} Devices",
+                targets=esphome_targets,
+                host_groups=None,
+                status_to_count=status_to_count,
+                count_mode=_COUNT_MODE_ACTIVE_INACTIVE,
+            )
+            count_entities.append(s)
+            if s.unique_id:
+                new_unique_ids.add(s.unique_id)
+
+    # Bluetooth
+    if bluetooth_targets:
+        for status_to_count, label_part, count_key_part in (
+            ("active", "Active", "active"),
+            ("inactive", "Inactive", "inactive"),
+        ):
+            s = ConnectivityCountSensor(
+                coordinator=coordinator,
+                entry_id=entry.entry_id,
+                count_key=f"bluetooth_{count_key_part}_devices",
+                sensor_name=f"Bluetooth {label_part} Devices",
+                targets=bluetooth_targets,
+                host_groups=None,
+                status_to_count=status_to_count,
+                count_mode=_COUNT_MODE_ACTIVE_INACTIVE,
+            )
+            count_entities.append(s)
+            if s.unique_id:
+                new_unique_ids.add(s.unique_id)
+
+    entities.extend(count_entities)
 
     _LOGGER.debug(
         "Final entities to be added: %s",
@@ -1503,3 +1631,123 @@ class BluetoothSensor(ConnectivityMonitorEntity, SensorEntity):
             self.target.get(CONF_ALERT_GROUP) or self.target.get(CONF_ALERT_ACTION)
         ):
             await alert_handler.async_setup_alerts(self.entity_id, self.target)
+
+
+# ---------------------------------------------------------------------------
+# Summary / count sensors (not bound to any specific device)
+# ---------------------------------------------------------------------------
+
+_COUNT_MODE_ACTIVE_INACTIVE = "active_inactive"
+_COUNT_MODE_NETWORK_DEVICE = "network_device"
+_COUNT_MODE_NETWORK_PORT = "network_port"
+
+
+class ConnectivityCountSensor(
+    CoordinatorEntity["ConnectivityMonitorCoordinator"], SensorEntity
+):
+    """Sensor that counts devices or ports of a given type and connectivity status.
+
+    These sensors are not associated with any HA device; they aggregate across
+    all targets of their respective protocol type within a single config entry.
+    """
+
+    _attr_available = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:counter"
+
+    def __init__(
+        self,
+        coordinator: ConnectivityMonitorCoordinator,
+        entry_id: str,
+        count_key: str,
+        sensor_name: str,
+        targets: list[dict],
+        host_groups: dict[str, list[dict]] | None,
+        status_to_count: str,
+        count_mode: str,
+    ) -> None:
+        """Initialize a count sensor.
+
+        Args:
+            coordinator:      The shared data coordinator for this entry.
+            entry_id:         Config entry ID (used to make unique_id globally unique).
+            count_key:        Snake-case key, e.g. "bluetooth_active_devices".
+            sensor_name:      Human-readable sensor name shown in the UI.
+            targets:          All targets of the relevant protocol type.
+            host_groups:      For network-device mode: mapping of host -> target list.
+                              None for other modes.
+            status_to_count:  One of "active", "inactive", "connected",
+                              "partially_connected", "disconnected".
+            count_mode:       One of the _COUNT_MODE_* constants.
+        """
+        super().__init__(coordinator)
+        self._targets = targets
+        self._host_groups = host_groups
+        self._status_to_count = status_to_count
+        self._count_mode = count_mode
+
+        self._attr_name = sensor_name
+        self._attr_unique_id = f"connectivity_count_{entry_id}_{count_key}"
+        # entity_id: HA will resolve collisions when multiple entries exist
+        self.entity_id = f"sensor.connectivity_monitor_{count_key}"
+
+    @property
+    def native_value(self) -> int:
+        """Return the current count."""
+        if self._count_mode == _COUNT_MODE_NETWORK_DEVICE:
+            return self._count_network_devices()
+        if self._count_mode == _COUNT_MODE_NETWORK_PORT:
+            return self._count_network_ports()
+        return self._count_active_inactive()
+
+    # -- helpers ----------------------------------------------------------------
+
+    def _count_active_inactive(self) -> int:
+        count = 0
+        for target in self._targets:
+            data = self.coordinator.get_target_data(target)
+            if not data.get("device_found", True):
+                # device not found in HA — treat as inactive
+                if self._status_to_count == "inactive":
+                    count += 1
+                continue
+            active = data.get("active", False)
+            if self._status_to_count == "active" and active:
+                count += 1
+            elif self._status_to_count == "inactive" and not active:
+                count += 1
+        return count
+
+    def _count_network_devices(self) -> int:
+        if not self._host_groups:
+            return 0
+        count = 0
+        for host_target_list in self._host_groups.values():
+            all_connected = True
+            any_connected = False
+            for t in host_target_list:
+                data = self.coordinator.get_target_data(t)
+                if data.get("connected"):
+                    any_connected = True
+                else:
+                    all_connected = False
+            if all_connected:
+                device_status = "connected"
+            elif any_connected:
+                device_status = "partially_connected"
+            else:
+                device_status = "disconnected"
+            if device_status == self._status_to_count:
+                count += 1
+        return count
+
+    def _count_network_ports(self) -> int:
+        count = 0
+        for target in self._targets:
+            data = self.coordinator.get_target_data(target)
+            connected = data.get("connected", False)
+            if self._status_to_count == "connected" and connected:
+                count += 1
+            elif self._status_to_count == "disconnected" and not connected:
+                count += 1
+        return count
