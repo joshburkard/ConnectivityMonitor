@@ -11,6 +11,12 @@ var CM_STATUS_OPTIONS = {
              "Connected & Partially Connected", "All"]
 };
 var CM_DEFAULT_STATUS = { Bluetooth: "All", ESP32: "All", Matter: "All", ZigBee: "All", Network: "All" };
+var CM_ENTITY_STATUS_OPTIONS = [
+  "Connected", "Disconnected", "Partially Connected",
+  "Disconnected & Partially Connected",
+  "Connected & Partially Connected",
+  "Active", "Inactive", "All"
+];
 
 var CM_STATUS_META = {
   Connected:             { label: "Connected",            css: "ok",      icon: "\u2713" },
@@ -35,6 +41,66 @@ function cmEsc(s) {
   });
 }
 
+function cmNormalizeEntityList(value) {
+  var raw = [];
+  if (Array.isArray(value)) raw = value;
+  else if (typeof value === "string") raw = value.split(/[\n,]/);
+  var out = [];
+  for (var i = 0; i < raw.length; i++) {
+    var v = String(raw[i] || "").trim();
+    if (!v) continue;
+    out.push(v);
+  }
+  return out;
+}
+
+function cmMonitorKindForState(entityId, stateObj) {
+  if (!stateObj) return null;
+  var attrs = stateObj.attributes || {};
+  var mt = attrs.monitor_type;
+  if (!mt && entityId.endsWith("_overall")) return "Network";
+  if (mt === "zha") return "ZigBee";
+  if (mt === "matter") return "Matter";
+  if (mt === "bluetooth") return "Bluetooth";
+  if (mt === "esphome") return "ESP32";
+  if (!mt) return "Network";
+  return null;
+}
+
+function cmGetSelectableDevices(hass) {
+  var out = [];
+  if (!hass || !hass.states) return out;
+  var states = hass.states;
+  for (var eid in states) {
+    if (!eid.startsWith("sensor.connectivity_monitor_")) continue;
+    var s = states[eid];
+    if (!s || !s.attributes) continue;
+    var kind = cmMonitorKindForState(eid, s);
+    if (!kind) continue;
+
+    if (kind === "Network") {
+      if (!eid.endsWith("_overall")) continue;
+    } else {
+      if (eid.endsWith("_overall") || eid.endsWith("_ad")) continue;
+    }
+
+    var attrs = s.attributes;
+    var subtitle = attrs.host || attrs.ieee || attrs.node_id || attrs.bt_address || attrs.device_id || "";
+    var name = attrs.device_name || attrs.friendly_name || subtitle || eid;
+    out.push({
+      entityId: eid,
+      name: name,
+      kind: kind,
+      subtitle: subtitle
+    });
+  }
+
+  out.sort(function(a, b) {
+    return a.name.localeCompare(b.name) || a.entityId.localeCompare(b.entityId);
+  });
+  return out;
+}
+
 // --- Visual editor ---
 class ConnectivityMonitorCardEditor extends HTMLElement {
   setConfig(config) {
@@ -56,9 +122,12 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
     if (!this.shadowRoot) return;
     if (!this._config) return;
     var dt = this._config.device_type || "Network";
+    var selectedDevices = cmNormalizeEntityList(this._config.device_list || this._config.entities);
+    var mode = this._config.selection_mode || (selectedDevices.length > 0 ? "device_list" : "device_type");
     var sf = this._config.status_filter || CM_DEFAULT_STATUS[dt] || "All";
     var title = this._config.title != null ? this._config.title : "";
-    var opts = CM_STATUS_OPTIONS[dt] || CM_STATUS_OPTIONS["Network"];
+    var opts = mode === "device_list" ? CM_ENTITY_STATUS_OPTIONS : (CM_STATUS_OPTIONS[dt] || CM_STATUS_OPTIONS["Network"]);
+    var allSelectable = cmGetSelectableDevices(this._hass);
 
     var icon = this._config.icon != null ? this._config.icon : "";
 
@@ -72,13 +141,22 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
       var s = opts[j];
       sfOptions += "<option value='" + s + "'" + (s === sf ? " selected" : "") + ">" + s + "</option>";
     }
+    var deviceOptions = "";
+    for (var k = 0; k < allSelectable.length; k++) {
+      var dev = allSelectable[k];
+      var selected = selectedDevices.indexOf(dev.entityId) >= 0;
+      var text = dev.name + " [" + dev.kind + "]" + (dev.subtitle ? " - " + dev.subtitle : "");
+      deviceOptions += "<option value='" + cmEsc(dev.entityId) + "'" + (selected ? " selected" : "") + ">" + cmEsc(text) + "</option>";
+    }
 
     this.shadowRoot.innerHTML =
       "<style>" +
       ".form { display:flex; flex-direction:column; gap:16px; padding:16px; }" +
       "label { font-size:14px; font-weight:500; color:var(--primary-text-color); display:block; margin-bottom:4px; }" +
-      "select, input[type=text] { width:100%; padding:8px 12px; border:1px solid var(--divider-color,#e0e0e0); border-radius:4px; background:var(--card-background-color,#fff); color:var(--primary-text-color); font-size:14px; }" +
-      "select:focus, input[type=text]:focus { outline:none; border-color:var(--primary-color); }" +
+      "select, input[type=text], textarea { width:100%; padding:8px 12px; border:1px solid var(--divider-color,#e0e0e0); border-radius:4px; background:var(--card-background-color,#fff); color:var(--primary-text-color); font-size:14px; }" +
+      "select:focus, input[type=text]:focus, textarea:focus { outline:none; border-color:var(--primary-color); }" +
+      "select[multiple] { min-height:150px; }" +
+      ".field-help { color:var(--secondary-text-color); font-size:12px; margin-top:4px; }" +
       "ha-icon-picker { display:block; width:100%; }" +
       "</style>" +
       "<div class='form'>" +
@@ -86,11 +164,24 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
       "<ha-icon-picker id='cm_icon' value='" + cmEsc(icon) + "' placeholder='mdi:lan'></ha-icon-picker></div>" +
       "<div><label>Title</label>" +
       "<input type='text' id='cm_title' value='" + cmEsc(title) + "' placeholder='Connectivity Monitor - " + cmEsc(dt) + "'></div>" +
+      "<div><label>Selection</label>" +
+      "<select id='cm_mode'>" +
+      "<option value='device_type'" + (mode === "device_type" ? " selected" : "") + ">Device Type</option>" +
+      "<option value='device_list'" + (mode === "device_list" ? " selected" : "") + ">Device List</option>" +
+      "</select></div>" +
       "<div><label>Device Type</label>" +
       "<select id='cm_dt'>" + dtOptions + "</select></div>" +
+      "<div><label>Device List</label>" +
+      "<select id='cm_devices' multiple>" + deviceOptions + "</select>" +
+      "<div class='field-help'>Only Connectivity Monitor devices are shown.</div></div>" +
       "<div><label>Status Filter</label>" +
       "<select id='cm_sf'>" + sfOptions + "</select></div>" +
       "</div>";
+
+    var dtRow = this.shadowRoot.getElementById("cm_dt").closest("div");
+    var entitiesRow = this.shadowRoot.getElementById("cm_devices").closest("div");
+    if (dtRow) dtRow.style.display = mode === "device_type" ? "" : "none";
+    if (entitiesRow) entitiesRow.style.display = mode === "device_list" ? "" : "none";
 
     var self = this;
     this.shadowRoot.getElementById("cm_icon").addEventListener("value-changed", function(e) {
@@ -106,11 +197,26 @@ class ConnectivityMonitorCardEditor extends HTMLElement {
       self._config = Object.assign({}, self._config, { title: e.target.value });
       self._fire();
     });
+    this.shadowRoot.getElementById("cm_mode").addEventListener("change", function(e) {
+      var v = e.target.value;
+      self._config = Object.assign({}, self._config, { selection_mode: v, status_filter: "All" });
+      self._fire();
+      self._render();
+    });
     this.shadowRoot.getElementById("cm_dt").addEventListener("change", function(e) {
       var v = e.target.value;
       self._config = Object.assign({}, self._config, { device_type: v, status_filter: CM_DEFAULT_STATUS[v] });
       self._fire();
       self._render();
+    });
+    this.shadowRoot.getElementById("cm_devices").addEventListener("change", function(e) {
+      var selected = [];
+      var opts = e.target.options;
+      for (var i = 0; i < opts.length; i++) {
+        if (opts[i].selected) selected.push(opts[i].value);
+      }
+      self._config = Object.assign({}, self._config, { device_list: selected, entities: selected });
+      self._fire();
     });
     this.shadowRoot.getElementById("cm_sf").addEventListener("change", function(e) {
       var v = e.target.value;
@@ -134,7 +240,17 @@ class ConnectivityMonitorCard extends HTMLElement {
   }
   static getStubConfig() { return { device_type: "Network", status_filter: "All" }; }
   setConfig(config) {
-    this._config = config;
+    this._config = Object.assign({}, config);
+    if (!this._config.selection_mode) {
+      this._config.selection_mode = cmNormalizeEntityList(this._config.device_list || this._config.entities).length > 0 ? "device_list" : "device_type";
+    }
+    if (this._config.selection_mode === "entities") {
+      this._config.selection_mode = "device_list";
+    }
+    if (this._config.selection_mode === "device_list") {
+      this._config.device_list = cmNormalizeEntityList(this._config.device_list || this._config.entities);
+      this._config.entities = this._config.device_list;
+    }
     // Migrate old "Both" value to "All"
     if (this._config && this._config.status_filter === "Both") {
       this._config = Object.assign({}, this._config, { status_filter: "All" });
@@ -196,29 +312,24 @@ class ConnectivityMonitorCard extends HTMLElement {
   }
 
   // -- Data fetching --
-  _getDevices() {
-    if (!this._hass) return [];
-    var states = this._hass.states;
-    var dt = (this._config && this._config.device_type) || "Network";
-    var devices = [];
+  _buildDeviceFromState(entityId, s, states) {
+    if (!s) return null;
+    var attrs = s.attributes || {};
+    var monitorType = attrs.monitor_type;
 
-    if (dt === "Network") {
-      for (var entityId in states) {
-        if (!entityId.startsWith("sensor.connectivity_monitor_")) continue;
-        if (!entityId.endsWith("_overall")) continue;
-        var st = states[entityId];
-        if (st.attributes.monitor_type === "zha") continue;
-        if (st.attributes.monitor_type === "matter") continue;
-        if (st.attributes.monitor_type === "esphome") continue;
-        if (st.attributes.monitor_type === "bluetooth") continue;
-        var host = st.attributes.host || "";
-        var sensors = [];
+    if (!monitorType && entityId.endsWith("_overall")) monitorType = "network";
+
+    if (monitorType !== "zha" && monitorType !== "matter" && monitorType !== "esphome" && monitorType !== "bluetooth") {
+      var host = attrs.host || attrs.device_name || attrs.friendly_name || entityId;
+      var sensors = [];
+      if (attrs.host) {
         for (var sid in states) {
           var ss = states[sid];
           if (!sid.startsWith("sensor.connectivity_monitor_")) continue;
           if (sid.endsWith("_overall") || sid.endsWith("_ad")) continue;
-          if (ss.attributes.host !== host) continue;
-          if (ss.attributes.monitor_type === "zha" || ss.attributes.monitor_type === "matter" || ss.attributes.monitor_type === "esphome" || ss.attributes.monitor_type === "bluetooth") continue;
+          if ((ss.attributes || {}).host !== attrs.host) continue;
+          var smt = (ss.attributes || {}).monitor_type;
+          if (smt === "zha" || smt === "matter" || smt === "esphome" || smt === "bluetooth") continue;
           sensors.push(ss);
         }
         sensors.sort(function(a, b) {
@@ -226,34 +337,82 @@ class ConnectivityMonitorCard extends HTMLElement {
           var bf = (b.state === "Disconnected" || b.state === "Not Connected") ? 0 : 1;
           return af !== bf ? af - bf : a.entity_id.localeCompare(b.entity_id);
         });
-        devices.push({
-          entityId: entityId,
-          name: st.attributes.device_name || host,
-          subtitle: host,
-          status: st.state || "Unknown",
-          sensors: sensors
-        });
+      }
+      return {
+        entityId: entityId,
+        name: attrs.device_name || attrs.friendly_name || host,
+        subtitle: attrs.host || host,
+        status: s.state || "Unknown",
+        sensors: sensors,
+        kind: "Network"
+      };
+    }
+
+    var sub = "";
+    var kind = "ESP32";
+    if (monitorType === "zha") {
+      kind = "ZigBee";
+      sub = attrs.ieee || "";
+    } else if (monitorType === "matter") {
+      kind = "Matter";
+      sub = attrs.node_id || "";
+    } else if (monitorType === "bluetooth") {
+      kind = "Bluetooth";
+      sub = attrs.bt_address || "";
+    } else {
+      sub = attrs.device_id || "";
+    }
+    return {
+      entityId: entityId,
+      name: attrs.device_name || attrs.friendly_name || sub || entityId,
+      subtitle: sub,
+      status: s.state || "Unknown",
+      sensors: [],
+      minutesAgo: attrs.minutes_ago,
+      timeout: attrs.timeout_minutes,
+      kind: kind
+    };
+  }
+
+  _getDevices() {
+    if (!this._hass) return [];
+    var states = this._hass.states;
+    var dt = (this._config && this._config.device_type) || "Network";
+    var mode = (this._config && this._config.selection_mode) || "device_type";
+    var devices = [];
+
+    if (mode === "device_list") {
+      var entityIds = cmNormalizeEntityList((this._config && this._config.device_list) || (this._config && this._config.entities));
+      for (var i = 0; i < entityIds.length; i++) {
+        var selectedId = entityIds[i];
+        var selectedState = states[selectedId];
+        var selectedDevice = this._buildDeviceFromState(selectedId, selectedState, states);
+        if (selectedDevice) devices.push(selectedDevice);
+      }
+      return devices;
+    }
+
+    if (dt === "Network") {
+      for (var entityId in states) {
+        if (!entityId.startsWith("sensor.connectivity_monitor_")) continue;
+        if (!entityId.endsWith("_overall")) continue;
+        var st = states[entityId];
+        if (!st || !st.attributes) continue;
+        if (st.attributes.monitor_type === "zha") continue;
+        if (st.attributes.monitor_type === "matter") continue;
+        if (st.attributes.monitor_type === "esphome") continue;
+        if (st.attributes.monitor_type === "bluetooth") continue;
+        var netDevice = this._buildDeviceFromState(entityId, st, states);
+        if (netDevice) devices.push(netDevice);
       }
     } else {
       var monitorType = dt === "ZigBee" ? "zha" : dt === "Matter" ? "matter" : dt === "Bluetooth" ? "bluetooth" : "esphome";
       for (var eid in states) {
         if (!eid.startsWith("sensor.connectivity_monitor_")) continue;
         var s = states[eid];
-        if (s.attributes.monitor_type !== monitorType) continue;
-        var sub = "";
-        if (monitorType === "zha") sub = s.attributes.ieee || "";
-        else if (monitorType === "matter") sub = s.attributes.node_id || "";
-        else if (monitorType === "bluetooth") sub = s.attributes.bt_address || "";
-        else sub = s.attributes.device_id || "";
-        devices.push({
-          entityId: eid,
-          name: s.attributes.device_name || sub,
-          subtitle: sub,
-          status: s.state || "Unknown",
-          sensors: [],
-          minutesAgo: s.attributes.minutes_ago,
-          timeout: s.attributes.timeout_minutes
-        });
+        if (!s || !s.attributes || s.attributes.monitor_type !== monitorType) continue;
+        var typedDevice = this._buildDeviceFromState(eid, s, states);
+        if (typedDevice) devices.push(typedDevice);
       }
     }
     return devices;
@@ -261,21 +420,17 @@ class ConnectivityMonitorCard extends HTMLElement {
 
   _filterDevices(devices) {
     var sf = (this._config && this._config.status_filter) || "All";
-    var dt = (this._config && this._config.device_type) || "Network";
     if (sf === "All") return devices;
     var result = [];
     for (var i = 0; i < devices.length; i++) {
       var d = devices[i];
-      if (dt === "Network") {
-        if (sf === "Connected" && d.status === "Connected") result.push(d);
-        else if (sf === "Disconnected" && (d.status === "Disconnected" || d.status === "Not Connected")) result.push(d);
-        else if (sf === "Partially Connected" && d.status === "Partially Connected") result.push(d);
-        else if (sf === "Disconnected & Partially Connected" && (d.status === "Disconnected" || d.status === "Not Connected" || d.status === "Partially Connected")) result.push(d);
-        else if (sf === "Connected & Partially Connected" && (d.status === "Connected" || d.status === "Partially Connected")) result.push(d);
-      } else {
-        if (sf === "Active" && d.status === "Active") result.push(d);
-        else if (sf === "Inactive" && (d.status === "Inactive" || d.status === "Unknown")) result.push(d);
-      }
+      if (sf === "Connected" && d.status === "Connected") result.push(d);
+      else if (sf === "Disconnected" && (d.status === "Disconnected" || d.status === "Not Connected")) result.push(d);
+      else if (sf === "Partially Connected" && d.status === "Partially Connected") result.push(d);
+      else if (sf === "Disconnected & Partially Connected" && (d.status === "Disconnected" || d.status === "Not Connected" || d.status === "Partially Connected")) result.push(d);
+      else if (sf === "Connected & Partially Connected" && (d.status === "Connected" || d.status === "Partially Connected")) result.push(d);
+      else if (sf === "Active" && d.status === "Active") result.push(d);
+      else if (sf === "Inactive" && (d.status === "Inactive" || d.status === "Unknown")) result.push(d);
     }
     return result;
   }
@@ -387,7 +542,7 @@ class ConnectivityMonitorCard extends HTMLElement {
 
   _renderDevice(device) {
     var meta = CM_STATUS_META[device.status] || CM_STATUS_META.Unknown;
-    var dt = (this._config && this._config.device_type) || "Network";
+    var dt = device.kind || ((this._config && this._config.device_type) || "Network");
     var collapsed = this._collapsed && this._collapsed.has(device.entityId);
     var chevron = collapsed ? "\u25b6" : "\u25bc";
 
@@ -494,6 +649,7 @@ class ConnectivityMonitorCard extends HTMLElement {
   _render() {
     if (!this.shadowRoot) return;
     var dt = (this._config && this._config.device_type) || "Network";
+    var mode = (this._config && this._config.selection_mode) || "device_type";
     var sf = (this._config && this._config.status_filter) || CM_DEFAULT_STATUS[dt] || "All";
     var allDevices = this._getDevices();
     this._syncCollapsedWithStatus(allDevices);
@@ -502,7 +658,8 @@ class ConnectivityMonitorCard extends HTMLElement {
 
     var bodyHtml = "";
     if (filtered.length === 0) {
-      bodyHtml = "<div class='no-devices'>No " + cmEsc(dt) + " devices" +
+      var label = mode === "device_list" ? "selected devices" : (cmEsc(dt) + " devices");
+      bodyHtml = "<div class='no-devices'>No " + label +
         (sf !== "All" && sf !== "Both" ? " with status '" + cmEsc(sf) + "'" : "") +
         " found.</div>";
     } else {

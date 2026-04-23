@@ -2,6 +2,7 @@
 
 | Version | Date | Description |
 | --- | --- | --- |
+| 0.1.00058 | 23/04/2026 | adjusted LoveLace card allows selecting multiple devices or device type |
 | 0.1.00057 | 21/04/2026 | added general sensors to display count of active inactive sensors / devices per device type |
 | 0.1.00056 | 17/04/2026 | added mdi icon picker to LoveLace card configurator |
 | 0.1.00055 | 16/04/2026 | fixed wrong named LoveLace file |
